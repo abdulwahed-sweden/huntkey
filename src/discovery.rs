@@ -1,7 +1,7 @@
 /// HuntLoan discovery — Goldsky subgraph paginator for Aave V3 Base borrowers.
 ///
 /// Queries the Aave V3 Base subgraph for accounts with an active borrow
-/// position (currentTotalDebt > 0) and writes their addresses to the watchlist
+/// position (borrowedReservesCount > 0) and writes their addresses to the watchlist
 /// JSON so the scanner can pick them up on the next block.
 ///
 /// Endpoint: Goldsky public Aave V3 Base subgraph
@@ -133,7 +133,7 @@ async fn fetch_page(client: &reqwest::Client, cursor: &str) -> Result<Vec<Addres
     first: {PAGE_SIZE}
     orderBy: id
     orderDirection: asc
-    where: {{ currentTotalDebt_gt: "0"{id_filter} }}
+    where: {{ borrowedReservesCount_gt: 0{id_filter} }}
   ) {{
     id
   }}
