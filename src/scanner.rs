@@ -1,17 +1,17 @@
 /// HuntLoan scanner — identifies liquidatable positions on Aave V3 Base.
 ///
-/// Pipeline position: [scanner] → simulator → executor
+/// Pipeline: [scanner] → simulator → executor
 ///
-/// Uses Multicall3 to batch getUserAccountData calls: 500 addresses per RPC
-/// round-trip instead of one call per address. For 98K candidates this reduces
-/// RPC calls from 98,000 → ~196 per block scan.
+/// Stage 1 — Multicall3 batch (500 addresses / RPC call):
+///   getUserAccountData for every candidate → filter HF < 1.0 + Goldilocks range.
 ///
-/// Per candidate:
-///   1. Batch via Multicall3 aggregate3()
-///   2. Check health factor < 1.0 (18-dec fixed-point)
-///   3. Goldilocks filter: $5K–$500K debt range
-///   4. Pre-screen profitability via math::simulate
-///   5. Return sorted opportunities (highest profit first)
+/// Stage 2 — Reserve resolution (1 Multicall3 per surviving candidate):
+///   getUserReserveData for every Aave reserve → identify actual collateral/debt assets.
+///   Applies delta-neutral filter: skip positions where collateral and debt are
+///   in the same price family (e.g. wstETH collateral + WETH debt).
+///
+/// Stage 3 — Profit pre-screen:
+///   math::simulate with actual liquidation bonus from on-chain reserve config.
 use alloy::{
     primitives::{Address, Bytes},
     providers::Provider,
@@ -21,7 +21,7 @@ use alloy::{
 use eyre::Result;
 use tracing::{info, warn};
 
-use crate::{config::Config, constants, math};
+use crate::{config::Config, constants, math, reserves::ReserveCache};
 
 // ── Aave V3 Pool ─────────────────────────────────────────────────────────────
 
@@ -61,138 +61,91 @@ sol! {
     }
 }
 
-/// Number of getUserAccountData calls batched per Multicall3 round-trip.
+/// Addresses batched per Multicall3 aggregate3() call.
 const MULTICALL_CHUNK: usize = 500;
 
 // ── Opportunity ───────────────────────────────────────────────────────────────
 
-/// A liquidation opportunity ready for simulation + execution.
+/// A fully resolved liquidation opportunity ready for simulation + execution.
 #[derive(Debug, Clone)]
 pub struct Opportunity {
     pub borrower:             Address,
     pub health_factor:        f64,
     pub debt_usd:             u128,
     pub collateral_usd:       u128,
-    pub collateral_asset:     Address, // Address::ZERO until per-reserve scan
-    pub debt_asset:           Address, // Address::ZERO until per-reserve scan
-    pub debt_to_repay:        u128,    // 50% of total debt (Aave V3 cap)
+    /// Resolved on-chain collateral asset address.
+    pub collateral_asset:     Address,
+    /// Resolved on-chain debt asset address.
+    pub debt_asset:           Address,
+    /// 50% of total debt (Aave V3 max per liquidation call).
+    pub debt_to_repay:        u128,
+    /// Actual liquidation bonus from Aave reserve config (bps, e.g. 500 = 5%).
+    pub liquidation_bonus_bps: u128,
     pub estimated_profit_usd: i128,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Scan a list of candidate borrowers and return profitable opportunities.
+/// Scan candidates and return resolved, profitable, non-delta-neutral opportunities.
 ///
-/// Batches all getUserAccountData calls via Multicall3 in chunks of 500.
-/// This function is called once per block by the HuntLoanEngine.
+/// The `reserve_cache` must be pre-loaded at engine startup (ReserveCache::load).
 pub async fn scan<P: Provider>(
     provider: &P,
     cfg: &Config,
     candidates: &[Address],
     eth_price_usd: u128,
     base_fee_wei: u128,
+    reserve_cache: &ReserveCache,
 ) -> Result<Vec<Opportunity>> {
-    let mut opportunities = Vec::new();
+    // ── Stage 1: batch HF check ───────────────────────────────────────────────
+    let mut liquidatable: Vec<(Address, f64, u128, u128)> = Vec::new(); // (addr, hf, debt, coll) USD 6-dec
     let mut rpc_calls = 0_usize;
 
     for chunk in candidates.chunks(MULTICALL_CHUNK) {
         rpc_calls += 1;
-        match scan_chunk(provider, cfg, chunk, eth_price_usd, base_fee_wei).await {
-            Ok(mut opps) => opportunities.append(&mut opps),
-            Err(e) => warn!("Multicall3 chunk failed (chunk {}): {}", rpc_calls, e),
+        match hf_chunk(provider, cfg, chunk).await {
+            Ok(mut v) => liquidatable.append(&mut v),
+            Err(e)    => warn!("HF chunk {} failed: {}", rpc_calls, e),
         }
     }
 
-    if rpc_calls > 0 {
-        info!(
-            candidates = candidates.len(),
-            rpc_calls  = rpc_calls,
-            found      = opportunities.len(),
-            "Scan complete"
-        );
+    if liquidatable.is_empty() {
+        return Ok(vec![]);
     }
 
-    // Sort by estimated profit descending
-    opportunities.sort_by(|a, b| b.estimated_profit_usd.cmp(&a.estimated_profit_usd));
-    Ok(opportunities)
-}
+    info!(
+        candidates  = candidates.len(),
+        rpc_batches = rpc_calls,
+        liquidatable = liquidatable.len(),
+        "Stage 1 complete"
+    );
 
-// ── Internal ──────────────────────────────────────────────────────────────────
+    // ── Stage 2: resolve actual assets + delta-neutral filter ────────────────
+    let borrowers: Vec<Address> = liquidatable.iter().map(|(a, ..)| *a).collect();
+    let positions: std::collections::HashMap<Address, reserves::ResolvedPosition> =
+        reserves::resolve_positions(provider, reserve_cache, &borrowers).await;
 
-/// Execute one Multicall3 batch and decode the results.
-async fn scan_chunk<P: Provider>(
-    provider: &P,
-    cfg: &Config,
-    chunk: &[Address],
-    eth_price_usd: u128,
-    base_fee_wei: u128,
-) -> Result<Vec<Opportunity>> {
-    // Encode one getUserAccountData call per address
-    let calls: Vec<IMulticall3::Call3> = chunk
-        .iter()
-        .map(|&addr| IMulticall3::Call3 {
-            target:       cfg.aave_pool,
-            allowFailure: true, // continue even if individual calls revert
-            callData:     Bytes::from(
-                IAavePool::getUserAccountDataCall { user: addr }.abi_encode(),
-            ),
-        })
-        .collect();
+    let mut opportunities = Vec::new();
 
-    // Single RPC round-trip for the whole chunk.
-    // alloy v1: call() on a single-return-value function unwraps it directly,
-    // so aggregate3 (returns Result[] memory) comes back as Vec<IMulticall3::Result>.
-    let mc = IMulticall3::new(constants::MULTICALL3, provider);
-    let results = mc.aggregate3(calls).call().await?;
-
-    let mut opps = Vec::new();
-
-    for (&borrower, result) in chunk.iter().zip(results.iter()) {
-        if !result.success || result.returnData.is_empty() {
-            continue;
-        }
-
-        // Decode ABI-encoded return from getUserAccountData
-        // abi_decode_returns takes only the raw bytes in alloy 1.x
-        let data =
-            match IAavePool::getUserAccountDataCall::abi_decode_returns(&result.returnData) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-
-        // Health factor is 18-decimal fixed-point; < 1e18 = liquidatable
-        let hf_raw: u128 = match data.healthFactor.try_into() {
-            Ok(v) => v,
-            Err(_) => continue,
+    for (borrower, hf, debt_usd, coll_usd) in &liquidatable {
+        let pos = match positions.get(borrower) {
+            Some(p) => p,
+            None    => {
+                warn!(borrower = %borrower, "Reserve resolution failed — skipping");
+                continue;
+            }
         };
-        if hf_raw == 0 || hf_raw >= 1_000_000_000_000_000_000_u128 {
+
+        // Skip delta-neutral positions (e.g. wstETH vs WETH — no directional profit)
+        if pos.is_delta_neutral {
             continue;
         }
 
-        let hf: f64 = hf_raw as f64 / 1e18;
-
-        // Aave base units are 8-decimal; convert to 6-decimal USD (÷100)
-        let debt_usd: u128 = data.totalDebtBase.try_into().unwrap_or(0) / 100;
-        let coll_usd: u128 = data.totalCollateralBase.try_into().unwrap_or(0) / 100;
-
-        if debt_usd == 0 || coll_usd == 0 {
-            continue;
-        }
-
-        // Goldilocks filter: $5K – $500K debt range
-        if debt_usd < constants::GOLDILOCKS_MIN_DEBT_USD as u128
-            || debt_usd > constants::GOLDILOCKS_MAX_DEBT_USD as u128
-        {
-            continue;
-        }
-
-        // Aave V3 allows liquidating up to 50% of debt per call
         let debt_to_repay = debt_usd / 2;
-
         let sim = math::simulate(
             debt_to_repay,
-            coll_usd,
-            500, // 5% liquidation bonus — TODO: per-reserve on-chain lookup
+            *coll_usd,
+            pos.bonus_bps,
             base_fee_wei,
             eth_price_usd,
         );
@@ -201,17 +154,96 @@ async fn scan_chunk<P: Provider>(
             continue;
         }
 
-        opps.push(Opportunity {
-            borrower,
-            health_factor:        hf,
-            debt_usd,
-            collateral_usd:       coll_usd,
-            collateral_asset:     Address::ZERO, // TODO: per-reserve breakdown
-            debt_asset:           Address::ZERO,
+        info!(
+            borrower  = %borrower,
+            hf        = hf,
+            debt_usd  = debt_usd,
+            coll      = %pos.collateral_asset,
+            debt      = %pos.debt_asset,
+            bonus_bps = pos.bonus_bps,
+            profit    = sim.net_profit_usd,
+            "Opportunity found"
+        );
+
+        opportunities.push(Opportunity {
+            borrower:              *borrower,
+            health_factor:         *hf,
+            debt_usd:              *debt_usd,
+            collateral_usd:        *coll_usd,
+            collateral_asset:      pos.collateral_asset,
+            debt_asset:            pos.debt_asset,
             debt_to_repay,
-            estimated_profit_usd: sim.net_profit_usd,
+            liquidation_bonus_bps: pos.bonus_bps,
+            estimated_profit_usd:  sim.net_profit_usd,
         });
     }
 
-    Ok(opps)
+    // Sort by profit descending
+    opportunities.sort_by(|a, b| b.estimated_profit_usd.cmp(&a.estimated_profit_usd));
+    Ok(opportunities)
 }
+
+// ── Internal — Stage 1 batch ──────────────────────────────────────────────────
+
+/// Run one Multicall3 batch of getUserAccountData and return liquidatable entries.
+async fn hf_chunk<P: Provider>(
+    provider: &P,
+    cfg: &Config,
+    chunk: &[Address],
+) -> Result<Vec<(Address, f64, u128, u128)>> {
+    let calls: Vec<IMulticall3::Call3> = chunk
+        .iter()
+        .map(|&addr| IMulticall3::Call3 {
+            target:       cfg.aave_pool,
+            allowFailure: true,
+            callData:     Bytes::from(
+                IAavePool::getUserAccountDataCall { user: addr }.abi_encode(),
+            ),
+        })
+        .collect();
+
+    let mc      = IMulticall3::new(constants::MULTICALL3, provider);
+    let results = mc.aggregate3(calls).call().await?;
+
+    let mut out = Vec::new();
+
+    for (&borrower, result) in chunk.iter().zip(results.iter()) {
+        if !result.success || result.returnData.is_empty() {
+            continue;
+        }
+        let data =
+            match IAavePool::getUserAccountDataCall::abi_decode_returns(&result.returnData) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+        // HF 18-dec fixed-point; < 1e18 = liquidatable
+        let hf_raw: u128 = match data.healthFactor.try_into() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if hf_raw == 0 || hf_raw >= 1_000_000_000_000_000_000_u128 {
+            continue;
+        }
+
+        let hf: f64   = hf_raw as f64 / 1e18;
+        let debt_usd  = data.totalDebtBase.try_into().unwrap_or(0_u128) / 100; // 8-dec → 6-dec
+        let coll_usd  = data.totalCollateralBase.try_into().unwrap_or(0_u128) / 100;
+
+        if debt_usd == 0 || coll_usd == 0 { continue; }
+
+        // Goldilocks filter: $5K – $500K
+        if debt_usd < constants::GOLDILOCKS_MIN_DEBT_USD as u128
+            || debt_usd > constants::GOLDILOCKS_MAX_DEBT_USD as u128
+        {
+            continue;
+        }
+
+        out.push((borrower, hf, debt_usd, coll_usd));
+    }
+
+    Ok(out)
+}
+
+// ── Bring reserves into scope ─────────────────────────────────────────────────
+use crate::reserves;

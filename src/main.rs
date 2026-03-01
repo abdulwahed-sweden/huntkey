@@ -7,11 +7,13 @@
 mod alerts;
 mod config;
 mod constants;
+mod discovery;
 mod engine;
 mod executor;
 mod gas;
 mod math;
 mod oracle;
+mod reserves;
 mod scanner;
 mod simulator;
 

@@ -77,6 +77,133 @@ impl HuntLoanExecutor {
         })
     }
 
+    /// Fire two transactions simultaneously for high-conviction opportunities.
+    ///
+    /// Shot 1 (nonce N):   STRIKE tier fees — competitive baseline.
+    /// Shot 2 (nonce N+1): KILL tier fees   — aggressive escalation.
+    ///
+    /// Both are sent before either is awaited, maximising time-to-mempool
+    /// overlap. The first to be included wins the liquidation; the second
+    /// will attempt the same borrower and revert harmlessly (costs gas only).
+    ///
+    /// Returns (strike_result, kill_result) — either can be None if that
+    /// shot failed to send or get a receipt.
+    pub async fn execute_parallel(
+        &self,
+        opp: &Opportunity,
+        sim: &SimOutput,
+        base_fee_wei: u128,
+    ) -> (Option<ExecutionResult>, Option<ExecutionResult>) {
+        let t = Instant::now();
+
+        let gl = if sim.estimated_gas > 0 {
+            ((sim.estimated_gas as u128 * 120 / 100).max(800_000)) as u64
+        } else {
+            800_000_u64
+        };
+        let gt_s = gas::compute_gas_tier(base_fee_wei, 1_000_000_000, gas::Tier::Strike, gas::Regime::Stable);
+        let gt_k = gas::compute_gas_tier(base_fee_wei, 1_000_000_000, gas::Tier::Kill,   gas::Regime::Stable);
+
+        if self.config.dry_run {
+            info!(
+                mode          = "DRY_RUN",
+                borrower      = %opp.borrower,
+                profit_usd    = sim.net_profit_usd,
+                strike_gwei   = gt_s.max_fee_per_gas / 1_000_000_000,
+                kill_gwei     = gt_k.max_fee_per_gas / 1_000_000_000,
+                "DRY_RUN — parallel dual-shot NOT sent"
+            );
+            return (None, None);
+        }
+
+        let url = match self.config.rpc_http.parse() {
+            Ok(u)  => u,
+            Err(e) => { warn!("Parallel shot: invalid RPC URL: {}", e); return (None, None); }
+        };
+        let provider = std::sync::Arc::new(
+            ProviderBuilder::new().wallet(self.wallet.clone()).connect_http(url)
+        );
+
+        let nonce = match self.acquire_nonce(provider.as_ref()).await {
+            Ok(n)  => n,
+            Err(e) => { warn!("Parallel shot: nonce failed: {}", e); return (None, None); }
+        };
+        // Claim both nonce N and N+1 before any await
+        *self.nonce.lock().await = Some(nonce + 2);
+
+        info!(
+            borrower     = %opp.borrower,
+            nonce_strike = nonce,
+            nonce_kill   = nonce + 1,
+            "Parallel dual-shot: STRIKE + KILL"
+        );
+
+        let contract = IHuntLoanReceiver::new(self.config.huntloan_addr, provider.as_ref());
+
+        // Send Shot 1 then Shot 2 before awaiting either receipt
+        let sent1 = contract
+            .requestFlashLiquidation(
+                opp.debt_asset,
+                U256::from(opp.debt_to_repay),
+                opp.collateral_asset,
+                opp.borrower,
+            )
+            .max_fee_per_gas(gt_s.max_fee_per_gas)
+            .max_priority_fee_per_gas(gt_s.max_priority_fee)
+            .gas(gl)
+            .nonce(nonce)
+            .send()
+            .await;
+
+        let sent2 = contract
+            .requestFlashLiquidation(
+                opp.debt_asset,
+                U256::from(opp.debt_to_repay),
+                opp.collateral_asset,
+                opp.borrower,
+            )
+            .max_fee_per_gas(gt_k.max_fee_per_gas)
+            .max_priority_fee_per_gas(gt_k.max_priority_fee)
+            .gas(gl)
+            .nonce(nonce + 1)
+            .send()
+            .await;
+
+        // Concurrently wait for both receipts
+        let (r1, r2) = tokio::join!(
+            async {
+                match sent1 {
+                    Ok(pending) => {
+                        let h = *pending.tx_hash();
+                        pending.get_receipt().await.ok().map(|receipt| ExecutionResult {
+                            tx_hash:         h,
+                            block_number:    receipt.block_number.unwrap_or(0),
+                            gas_used:        receipt.gas_used as u64,
+                            send_latency_ms: t.elapsed().as_millis() as u64,
+                        })
+                    }
+                    Err(e) => { warn!(shot = "STRIKE", error = %e, "Send failed"); None }
+                }
+            },
+            async {
+                match sent2 {
+                    Ok(pending) => {
+                        let h = *pending.tx_hash();
+                        pending.get_receipt().await.ok().map(|receipt| ExecutionResult {
+                            tx_hash:         h,
+                            block_number:    receipt.block_number.unwrap_or(0),
+                            gas_used:        receipt.gas_used as u64,
+                            send_latency_ms: t.elapsed().as_millis() as u64,
+                        })
+                    }
+                    Err(e) => { warn!(shot = "KILL", error = %e, "Send failed"); None }
+                }
+            }
+        );
+
+        (r1, r2)
+    }
+
     /// Execute a liquidation opportunity.
     ///
     /// DRY_RUN=true  → logs intent, no tx sent.

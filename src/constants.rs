@@ -98,3 +98,42 @@ pub fn is_delta_neutral(coll_sym: &str, debt_sym: &str) -> bool {
     let df = asset_family(debt_sym);
     cf != AssetFamily::Other && df != AssetFamily::Other && cf == df
 }
+
+// ── Address-based family lookup (for on-chain reserve resolution) ────────────
+// Maps known Base Aave V3 token addresses → AssetFamily without a symbol lookup.
+
+/// Resolve asset family directly from contract address.
+/// Used by the reserves module which works with addresses, not symbols.
+pub fn asset_family_by_addr(addr: Address) -> AssetFamily {
+    // ETH family — Base mainnet
+    const ETH_ADDRS: &[Address] = &[
+        address!("4200000000000000000000000000000000000006"), // WETH
+        address!("2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22"), // cbETH
+        address!("c1CBa3fCea344f92D9239c08C0568f6F2F0ee452"), // wstETH
+        address!("04C0599Ae5A44757c0af6F9eC3b93da8976c150A"), // weETH
+        address!("B6fe221Fe9EeF5aBa221c348bA20A1Bf5e73624c"), // rETH
+        address!("9Bcef72be871e61ED4fBbc7630889beE758eb81D"), // rETH (alt)
+        address!("7FcD174E80f567B3CE2f6C75B27b4b06A6A7e24B"), // ezETH
+        address!("1FE5da4fad2E30a0aB0C3b22F04C5ab1Ab4f29ba"), // pxETH
+    ];
+    // Stable family — Base mainnet
+    const STABLE_ADDRS: &[Address] = &[
+        address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"), // USDC
+        address!("d9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA"), // USDbC
+        address!("50c5725949A6F0c72E6C4a641F24049A917DB0Cb"), // DAI
+        address!("4A3A6Dd60A34bB2Aba60D73B4C88315E9CeB6A3D"), // USDT
+        address!("cD68DFf4415358c35a28f96Fd5bF7083B37B45A4"), // LUSD
+        address!("6Bb7a212910682DCFdbd5BCBb3e28FB4E8da10Ee"), // GHO
+        address!("60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42"), // EURC
+    ];
+    // BTC family — Base mainnet
+    const BTC_ADDRS: &[Address] = &[
+        address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"), // cbBTC
+        address!("2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"), // WBTC (bridged)
+    ];
+
+    if ETH_ADDRS.contains(&addr)    { return AssetFamily::Eth; }
+    if STABLE_ADDRS.contains(&addr) { return AssetFamily::Stable; }
+    if BTC_ADDRS.contains(&addr)    { return AssetFamily::Btc; }
+    AssetFamily::Other
+}

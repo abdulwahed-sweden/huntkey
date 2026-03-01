@@ -19,8 +19,11 @@ use tracing::{error, info, warn};
 
 use crate::{
     config::Config,
+    constants::{self, PARALLEL_CONVICTION_USD},
+    discovery,
     executor::HuntLoanExecutor,
     oracle,
+    reserves::ReserveCache,
     scanner,
     simulator,
 };
@@ -59,6 +62,16 @@ impl HuntLoanEngine {
             .wrap_err("WebSocket connection failed")?;
         let ws_provider = Arc::new(ws_provider);
 
+        // ── Load reserve cache once at startup ───────────────────────────────
+        info!("[HuntLoanEngine] Loading Aave V3 reserve cache...");
+        let reserve_cache = ReserveCache::load(
+            ws_provider.as_ref(),
+            constants::AAVE_POOL,
+            constants::AAVE_DATA,
+        )
+        .await
+        .wrap_err("Failed to load reserve cache")?;
+
         info!("[HuntLoanEngine] Subscribing to new block headers...");
         let sub = ws_provider
             .subscribe_blocks()
@@ -67,6 +80,14 @@ impl HuntLoanEngine {
         let mut block_stream = sub.into_stream();
 
         info!("[HuntLoanEngine] Pipeline active — DRY_RUN={}", self.config.dry_run);
+
+        // Refresh watchlist on first boot so we don't rely solely on a stale file
+        if let Err(e) = discovery::refresh_watchlist(&self.config.watchlist_path).await {
+            warn!("[HuntLoanEngine] Initial watchlist refresh failed: {}", e);
+        }
+
+        let mut last_discovery_block: u64 = 0;
+        const DISCOVERY_INTERVAL_BLOCKS: u64 = 300; // ~10 min on Base (2s blocks)
 
         while let Some(block) = block_stream.next().await {
             let block_start = Instant::now();
@@ -77,8 +98,19 @@ impl HuntLoanEngine {
                 .unwrap_or(1_000_000_u64)
                 .into();
 
+            // Periodic subgraph discovery (non-blocking — runs in background)
+            if block_num.saturating_sub(last_discovery_block) >= DISCOVERY_INTERVAL_BLOCKS {
+                let path = self.config.watchlist_path.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = discovery::refresh_watchlist(&path).await {
+                        warn!("[discovery] Background refresh failed: {}", e);
+                    }
+                });
+                last_discovery_block = block_num;
+            }
+
             if let Err(e) = self
-                .process_block(&ws_provider, block_num, base_fee, block_start)
+                .process_block(&ws_provider, block_num, base_fee, block_start, &reserve_cache)
                 .await
             {
                 error!(block = block_num, error = %e, "Block processing error");
@@ -97,6 +129,7 @@ impl HuntLoanEngine {
         block_num: u64,
         base_fee_wei: u128,
         block_start: Instant,
+        reserve_cache: &ReserveCache,
     ) -> Result<()> {
         let eth_price = oracle::fetch_eth_price_usd(provider.as_ref()).await;
 
@@ -109,6 +142,7 @@ impl HuntLoanEngine {
             &candidates,
             eth_price,
             base_fee_wei,
+            reserve_cache,
         )
         .await?;
         let scan_ms = scan_t.elapsed().as_millis();
@@ -174,27 +208,55 @@ impl HuntLoanEngine {
 
         // ── Stage 3: EXECUTE ─────────────────────────────────────────────────
         let exec_t = Instant::now();
-        match self.executor.execute(&best_opp, &best_sim, base_fee_wei).await {
-            Ok(result) => {
-                let exec_ms  = exec_t.elapsed().as_millis();
-                let total_ms = block_start.elapsed().as_millis();
-                info!(
-                    tx_hash      = %result.tx_hash,
-                    block        = result.block_number,
-                    gas_used     = result.gas_used,
-                    scan_ms      = scan_ms,
-                    sim_ms       = sim_ms,
-                    exec_ms      = exec_ms,
-                    total_ms     = total_ms,
-                    "Liquidation complete"
-                );
+
+        if best_sim.net_profit_usd >= PARALLEL_CONVICTION_USD as i128 {
+            // High-conviction: dual-shot (STRIKE + KILL) fired in parallel
+            let (r1, r2) = self.executor
+                .execute_parallel(&best_opp, &best_sim, base_fee_wei)
+                .await;
+
+            let exec_ms  = exec_t.elapsed().as_millis();
+            let total_ms = block_start.elapsed().as_millis();
+
+            for (shot, result) in [("STRIKE", r1), ("KILL", r2)] {
+                if let Some(r) = result {
+                    info!(
+                        shot    = shot,
+                        tx_hash = %r.tx_hash,
+                        block   = r.block_number,
+                        gas_used = r.gas_used,
+                        scan_ms  = scan_ms,
+                        sim_ms   = sim_ms,
+                        exec_ms  = exec_ms,
+                        total_ms = total_ms,
+                        "Parallel shot confirmed"
+                    );
+                }
             }
-            Err(e) => {
-                error!(
-                    borrower = %best_opp.borrower,
-                    error    = %e,
-                    "Execution failed"
-                );
+        } else {
+            // Standard single-shot execution
+            match self.executor.execute(&best_opp, &best_sim, base_fee_wei).await {
+                Ok(result) => {
+                    let exec_ms  = exec_t.elapsed().as_millis();
+                    let total_ms = block_start.elapsed().as_millis();
+                    info!(
+                        tx_hash      = %result.tx_hash,
+                        block        = result.block_number,
+                        gas_used     = result.gas_used,
+                        scan_ms      = scan_ms,
+                        sim_ms       = sim_ms,
+                        exec_ms      = exec_ms,
+                        total_ms     = total_ms,
+                        "Liquidation complete"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        borrower = %best_opp.borrower,
+                        error    = %e,
+                        "Execution failed"
+                    );
+                }
             }
         }
 
