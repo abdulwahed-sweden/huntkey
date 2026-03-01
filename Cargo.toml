@@ -1,0 +1,55 @@
+[package]
+name = "huntloan"
+version = "0.1.0"
+edition = "2024"
+description = "Flash loan liquidation bot — Aave V3 Base, pure Rust"
+
+[[bin]]
+name = "huntloan"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# EVM / RPC — alloy replaces deprecated ethers-rs
+alloy = { version = "1", features = [
+    "contract",
+    "network",
+    "providers",
+    "provider-http",
+    "provider-ws",
+    "rpc-types",
+    "signer-local",
+    "sol-types",
+    "json-abi",
+    "transport-http",
+    "transport-ws",
+] }
+
+# Error handling
+eyre = "0.6"
+color-eyre = "0.6"
+
+# Environment / config
+dotenvy = "0.15"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Numbers — precise fixed-point arithmetic for profit math
+uint = "0.9"
+
+# HTTP client (for price oracle REST fallback)
+reqwest = { version = "0.12", features = ["json"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
