@@ -6,6 +6,7 @@
 ///   HUNTLOAN_CONTRACT (unchanged)
 ///   TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID (unchanged)
 use alloy::primitives::{address, Address};
+use alloy::signers::local::PrivateKeySigner;
 use eyre::{Result, WrapErr};
 
 #[derive(Debug, Clone)]
@@ -18,7 +19,8 @@ pub struct Config {
     pub private_rpc_http: Option<String>,  // PRIVATE_RPC_URL
 
     // [WALLET]
-    pub operator_key: String,         // PRIVATE_KEY
+    pub operator_key:  String,        // PRIVATE_KEY
+    pub operator_addr: Address,       // derived from PRIVATE_KEY at startup
 
     // [CONTRACTS]
     pub huntloan_addr: Address,       // HUNTLOAN_CONTRACT
@@ -69,6 +71,11 @@ impl Config {
 
         let operator_key = std::env::var("PRIVATE_KEY")
             .wrap_err("PRIVATE_KEY is required")?;
+
+        let operator_addr = operator_key
+            .parse::<PrivateKeySigner>()
+            .wrap_err("PRIVATE_KEY is not a valid hex private key")?
+            .address();
 
         let huntloan_addr = parse_addr_env("HUNTLOAN_CONTRACT")
             .or_else(|_| parse_addr_env("EXECUTOR_ADDRESS")) // legacy fallback
@@ -124,6 +131,7 @@ impl Config {
             rpc_ws,
             private_rpc_http,
             operator_key,
+            operator_addr,
             huntloan_addr,
             aave_pool,
             telegram_token,

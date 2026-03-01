@@ -51,6 +51,7 @@ async fn main() -> Result<()> {
         rpc      = %config.rpc_http,
         ws       = ?config.rpc_ws.as_deref(),
         contract = %config.huntloan_addr,
+        operator = %config.operator_addr,
         mode     = mode,
         "Config loaded"
     );

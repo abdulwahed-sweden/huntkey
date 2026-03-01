@@ -65,6 +65,8 @@ pub async fn simulate_on_chain<P: Provider>(
     let contract = IHuntLoanReceiver::new(config.huntloan_addr, provider);
 
     // ── 1. eth_call — check for revert ───────────────────────────────────────
+    // Must call from the operator address so the contract's onlyOperator
+    // modifier passes. Without .from(), eth_call uses address(0) → OnlyOperator().
     let call_result = contract
         .requestFlashLiquidation(
             opp.debt_asset,
@@ -72,6 +74,7 @@ pub async fn simulate_on_chain<P: Provider>(
             opp.collateral_asset,
             opp.borrower,
         )
+        .from(config.operator_addr)
         .call()
         .await;
 
@@ -102,6 +105,7 @@ pub async fn simulate_on_chain<P: Provider>(
             opp.collateral_asset,
             opp.borrower,
         )
+        .from(config.operator_addr)
         .estimate_gas()
         .await
         .unwrap_or(800_000); // fallback to conservative estimate
