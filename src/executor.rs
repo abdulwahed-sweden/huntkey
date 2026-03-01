@@ -294,21 +294,23 @@ impl HuntLoanExecutor {
             );
 
             info!(
-                mode              = "SOFT_LIVE",
-                to                = %self.config.huntloan_addr,
-                chain_id          = self.config.chain_id,
-                nonce             = nonce,
-                max_fee_gwei      = fees.max_fee_per_gas / 1_000_000_000,
-                max_priority_gwei = fees.max_priority_fee / 1_000_000_000,
-                gas_limit         = fees.gas_limit,
-                value_wei         = 0,
-                calldata_bytes    = calldata.len(),
-                calldata          = %calldata,
-                borrower          = %opp.borrower,
-                debt_to_repay     = opp.debt_to_repay,
-                collateral        = %opp.collateral_asset,
-                debt_asset        = %opp.debt_asset,
-                estimated_profit  = sim.net_profit_usd,
+                mode                 = "SOFT_LIVE",
+                to                   = %self.config.huntloan_addr,
+                chain_id             = self.config.chain_id,
+                nonce                = nonce,
+                max_fee_wei          = fees.max_fee_per_gas,
+                max_fee_mgwei        = fees.max_fee_per_gas / 1_000_000,  // milli-gwei
+                max_priority_wei     = fees.max_priority_fee,
+                max_priority_mgwei   = fees.max_priority_fee / 1_000_000, // milli-gwei
+                gas_limit            = fees.gas_limit,
+                value_wei            = 0,
+                calldata_bytes       = calldata.len(),
+                calldata             = %calldata,
+                borrower             = %opp.borrower,
+                debt_to_repay        = opp.debt_to_repay,
+                collateral           = %opp.collateral_asset,
+                debt_asset           = %opp.debt_asset,
+                estimated_profit_usd = sim.net_profit_usd,
                 "SOFT_LIVE — full tx preview (NOT broadcast)"
             );
             return Ok(ExecutionResult {

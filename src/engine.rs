@@ -116,9 +116,13 @@ impl HuntLoanEngine {
             // alloy v1: subscribe_blocks() returns Header { hash, inner, .. }
             // inner is alloy_consensus::Header which holds number + base_fee_per_gas
             let block_num  = block.inner.number;
+            // Base L2 base fees are typically 1M–50M wei (0.001–0.05 gwei).
+            // Fallback 5_000_000 (0.005 gwei) ensures max_fee always > real base fee
+            // if the WS subscription omits base_fee_per_gas.
             let base_fee: u128 = block.inner.base_fee_per_gas
-                .unwrap_or(1_000_000_u64)
+                .unwrap_or(5_000_000_u64)
                 .into();
+            tracing::debug!(block = block_num, base_fee_wei = base_fee, "New block");
 
             // Periodic subgraph discovery (non-blocking — runs in background)
             if block_num.saturating_sub(last_discovery_block) >= DISCOVERY_INTERVAL_BLOCKS {
