@@ -16,6 +16,7 @@ mod oracle;
 mod reserves;
 mod scanner;
 mod simulator;
+mod velocity;
 
 use alloy::primitives::Address;
 use color_eyre::install as install_panic;

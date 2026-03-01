@@ -2,9 +2,11 @@
 
 Migration Phase 1: `Bitcoin-Sentinel/eth_forensics/simulation/` (Node.js) → `huntloan/` (Rust + Solidity)
 Migration Phase 2: Rebranding + Execution Engine + Event-Driven Scanner
+Migration Phase 3: Reserve resolution, delta-neutral filter, parallel execution, discovery, alerts, velocity
 
 Date Phase 1: 2026-03-01
 Date Phase 2: 2026-03-01
+Date Phase 3: 2026-03-01
 
 ---
 
@@ -95,21 +97,35 @@ WebSocket block event
 
 ---
 
+## Phase 3 — New Modules
+
+| Rust module | Description | Status |
+|---|---|---|
+| `src/reserves.rs` | On-chain reserve resolution via Multicall3; loads Aave V3 reserve list at startup; resolves actual collateral/debt assets per borrower | Complete |
+| `src/discovery.rs` | Goldsky subgraph paginator; cursor-based pagination (1000/page); rewrites watchlist JSON; triggered at boot + every 300 blocks | Complete |
+| `src/velocity.rs` | HF velocity engine; linear regression ETA prediction; feeds from scanner results; drives alert tier label | Complete + 4 unit tests |
+
+---
+
 ## Modules Implemented
 
 | Rust module | Corresponds to (old) | Status |
 |---|---|---|
-| `src/constants.rs` | `ADDRS` + `CONFIG` block in `monitor_base.js` | Complete |
+| `src/constants.rs` | `ADDRS` + `CONFIG` block in `monitor_base.js` | Complete — added `asset_family_by_addr()` |
 | `src/config.rs` | `process.env.*` usage across all scripts | Complete — normalized env names |
 | `src/gas.rs` | `gas_strategy.js` (full) | Complete + 4 unit tests |
 | `src/math.rs` | `findBestOpportunity()` profitability math | Complete + 3 unit tests |
-| `src/scanner.rs` | `monitor_base.js` → main scan loop | Complete — Goldilocks filter, HF check |
+| `src/oracle.rs` | *(new)* — Chainlink ETH/USD + Binance REST fallback | Complete + 1 unit test |
+| `src/scanner.rs` | `monitor_base.js` → main scan loop | Complete — Multicall3, reserve resolution, delta-neutral filter |
+| `src/reserves.rs` | *(new)* — Aave V3 reserve cache + position resolver | Complete |
 | `src/simulator.rs` | *(new)* — on-chain simulation layer | Complete — eth_call + gas estimate |
-| `src/executor.rs` | `execute_mev.js` → `triggerUniswapLiquidation()` | Complete — EIP-1559 + nonce + retry |
-| `src/engine.rs` | *(new)* — pipeline coordinator | Complete — WS block subscription |
-| `src/alerts.rs` | `telegram.js` | Complete — all 8 formatters + boot alert |
+| `src/executor.rs` | `execute_mev.js` → `triggerUniswapLiquidation()` | Complete — EIP-1559 + nonce + retry + parallel dual-shot |
+| `src/engine.rs` | *(new)* — pipeline coordinator | Complete — WS subscription, velocity feed, Telegram alerts |
+| `src/alerts.rs` | `telegram.js` | Complete — all 8 formatters, wired into engine pipeline |
+| `src/discovery.rs` | `discover_risky.js` | Complete — Goldsky subgraph + periodic refresh |
+| `src/velocity.rs` | *(new)* — HF velocity engine | Complete — linear regression ETA |
 | `src/main.rs` | `monitor_base.js` → `main()` | Complete — delegates to HuntLoanEngine |
-| `contracts/HuntLoanFlashReceiver.sol` | `contracts/AbdulwahidFlashLiquidator.sol` | Renamed + cleaned — swap stub remains |
+| `contracts/HuntLoanFlashReceiver.sol` | `contracts/AbdulwahidFlashLiquidator.sol` | Complete — 5-route swap cascade (Uniswap V3 × 3 + Aerodrome × 2) |
 
 ---
 
@@ -117,15 +133,10 @@ WebSocket block event
 
 | Component | Priority | Description |
 |---|---|---|
-| `_swapCollateralToDebt()` in HuntLoanFlashReceiver.sol | **P1** | Uniswap V3 SwapRouter or Aerodrome on Base — currently reverts |
-| Per-reserve Multicall3 batch scan | **P1** | Replace per-address HTTP calls in scanner.rs with Multicall3 batching |
-| ETH price oracle | **P2** | Replace `fetch_eth_price_usd()` stub ($2000) with Chainlink on-chain or Binance REST |
-| Parallel attack executor | **P2** | Port `race_controller.js` — dual-route when profit > $15K |
-| Flashbots private relay | **P2** | `alloy::providers::layers::flashbots_*` for MEV protection |
-| Per-reserve delta-neutral check | **P3** | Use `is_delta_neutral()` in scanner — requires on-chain reserve token symbols |
-| Discovery module | **P3** | Port `discover_risky.js` — Goldsky subgraph + RPC Borrow event scan |
-| HF velocity engine | **P3** | ETA prediction for pre-strike monitoring |
-| Deploy HuntLoanFlashReceiver.sol | — | `forge script script/Deploy.s.sol` — requires swap integration first |
+| Flashbots private relay | **P2** | `alloy::providers::layers` Flashbots bundle submission for MEV protection on Base |
+| Warm-zone velocity feed | **P3** | Feed `VelocityEngine` from a separate warm-zone scan (HF 1.07–1.15) not just liquidatable positions |
+| Bribe tracking per-tx | **P3** | Expose gas tier bribe fraction to profit alert formatter |
+| Deploy HuntLoanFlashReceiver.sol | — | `forge script script/Deploy.s.sol --rpc-url $RPC_URL --chain-id 8453` |
 
 ---
 

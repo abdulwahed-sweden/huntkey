@@ -7,6 +7,8 @@
 ///   - HTTP provider (wallet-backed) used for simulation and execution
 ///   - Each block triggers: scan → simulate → execute best opportunity
 ///   - Timing metrics logged for every stage
+///   - Telegram alerts fired at key pipeline events (non-blocking)
+///   - VelocityEngine records HF per borrower to compute ETA
 ///
 /// Replaces the 400ms polling loop from the legacy Node.js bot.
 use std::sync::Arc;
@@ -15,9 +17,11 @@ use std::time::Instant;
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use eyre::{Result, WrapErr};
 use futures_util::StreamExt;
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::{
+    alerts,
     config::Config,
     constants::{self, PARALLEL_CONVICTION_USD},
     discovery,
@@ -26,12 +30,14 @@ use crate::{
     reserves::ReserveCache,
     scanner,
     simulator,
+    velocity::VelocityEngine,
 };
 
 /// Top-level engine struct.
 pub struct HuntLoanEngine {
     config:   Arc<Config>,
     executor: HuntLoanExecutor,
+    velocity: Mutex<VelocityEngine>,
 }
 
 impl HuntLoanEngine {
@@ -40,7 +46,11 @@ impl HuntLoanEngine {
     pub fn new(config: Config) -> Result<Self> {
         let config = Arc::new(config);
         let executor = HuntLoanExecutor::new(config.clone())?;
-        Ok(Self { config, executor })
+        Ok(Self {
+            config,
+            executor,
+            velocity: Mutex::new(VelocityEngine::new()),
+        })
     }
 
     /// Run the engine: connect via WebSocket, subscribe to blocks, process each.
@@ -93,7 +103,7 @@ impl HuntLoanEngine {
             let block_start = Instant::now();
             // alloy v1: subscribe_blocks() returns Header { hash, inner, .. }
             // inner is alloy_consensus::Header which holds number + base_fee_per_gas
-            let block_num   = block.inner.number;
+            let block_num  = block.inner.number;
             let base_fee: u128 = block.inner.base_fee_per_gas
                 .unwrap_or(1_000_000_u64)
                 .into();
@@ -152,12 +162,21 @@ impl HuntLoanEngine {
         }
 
         info!(
-            block = block_num,
-            scan_ms = scan_ms,
-            candidates = candidates.len(),
+            block        = block_num,
+            scan_ms      = scan_ms,
+            candidates   = candidates.len(),
             opportunities = opportunities.len(),
             "Scan complete"
         );
+
+        // ── Feed velocity engine ─────────────────────────────────────────────
+        {
+            let mut ve = self.velocity.lock().await;
+            for opp in &opportunities {
+                ve.record(opp.borrower, opp.health_factor);
+            }
+            ve.maybe_gc();
+        }
 
         // ── Stage 2: SIMULATE ────────────────────────────────────────────────
         let sim_t = Instant::now();
@@ -175,8 +194,8 @@ impl HuntLoanEngine {
             {
                 Ok(sim) if sim.passes => profitable.push((opp.clone(), sim)),
                 Ok(sim) => warn!(
-                    borrower = %opp.borrower,
-                    reason = ?sim.revert_reason,
+                    borrower   = %opp.borrower,
+                    reason     = ?sim.revert_reason,
                     net_profit = sim.net_profit_usd,
                     "Simulation skip"
                 ),
@@ -196,18 +215,63 @@ impl HuntLoanEngine {
             .unwrap();
 
         info!(
-            block = block_num,
-            borrower = %best_opp.borrower,
-            hf = best_opp.health_factor,
-            debt_usd = best_opp.debt_usd,
+            block          = block_num,
+            borrower       = %best_opp.borrower,
+            hf             = best_opp.health_factor,
+            debt_usd       = best_opp.debt_usd,
             net_profit_usd = best_sim.net_profit_usd,
-            est_gas = best_sim.estimated_gas,
-            sim_ms = sim_ms,
+            est_gas        = best_sim.estimated_gas,
+            sim_ms         = sim_ms,
             "Best opportunity selected"
         );
 
+        // ── Alert: opportunity locked ────────────────────────────────────────
+        {
+            let tier = if best_opp.health_factor < 1.002 { "STRIKE" }
+                       else if best_opp.health_factor < 1.010 { "CRITICAL" }
+                       else { "HOT" };
+
+            let eta_str: Option<String> = {
+                let ve = self.velocity.lock().await;
+                ve.eta_minutes(&best_opp.borrower)
+                    .map(|m| format!("{:.0} min", m.max(0.0)))
+            };
+
+            let msg = alerts::fmt_critical(
+                &format!("{}", best_opp.borrower),
+                best_opp.health_factor,
+                best_opp.debt_usd as f64,
+                best_sim.net_profit_usd as f64,
+                eta_str.as_deref(),
+                tier,
+            );
+            // Throttle to one alert per borrower per 5 min (dedupe_key = addr)
+            let dedupe = format!("crit-{}", best_opp.borrower);
+            tokio::spawn(async move {
+                let _ = alerts::send_telegram(msg, Some(&dedupe), 300, false).await;
+            });
+        }
+
         // ── Stage 3: EXECUTE ─────────────────────────────────────────────────
         let exec_t = Instant::now();
+
+        // Pre-execute strike alert (forced — fire for every execution attempt)
+        {
+            let max_fee_gwei = base_fee_wei as f64 * 1.3 / 1_000_000_000.0; // STRIKE approx
+            let max_pri_gwei = 1.5; // 1 gwei priority
+            let msg = alerts::fmt_strike(
+                &format!("{}", best_opp.borrower),
+                best_opp.health_factor,
+                "FLASH → UNISWAP V3",
+                0.0, // bribe not tracked per-tx yet
+                0.0,
+                max_fee_gwei,
+                max_pri_gwei,
+            );
+            tokio::spawn(async move {
+                let _ = alerts::send_telegram(msg, None, 0, true).await;
+            });
+        }
 
         if best_sim.net_profit_usd >= PARALLEL_CONVICTION_USD as i128 {
             // High-conviction: dual-shot (STRIKE + KILL) fired in parallel
@@ -221,9 +285,9 @@ impl HuntLoanEngine {
             for (shot, result) in [("STRIKE", r1), ("KILL", r2)] {
                 if let Some(r) = result {
                     info!(
-                        shot    = shot,
-                        tx_hash = %r.tx_hash,
-                        block   = r.block_number,
+                        shot     = shot,
+                        tx_hash  = %r.tx_hash,
+                        block    = r.block_number,
                         gas_used = r.gas_used,
                         scan_ms  = scan_ms,
                         sim_ms   = sim_ms,
@@ -231,6 +295,18 @@ impl HuntLoanEngine {
                         total_ms = total_ms,
                         "Parallel shot confirmed"
                     );
+
+                    // Profit alert
+                    let gas_eth  = r.gas_used as f64 * base_fee_wei as f64 / 1e18;
+                    let net_eth  = best_sim.net_profit_usd as f64 / eth_price as f64;
+                    let borrower = format!("{}", best_opp.borrower);
+                    let tx_hash  = format!("{}", r.tx_hash);
+                    let block_no = r.block_number;
+                    let net_usd  = best_sim.net_profit_usd as f64;
+                    tokio::spawn(async move {
+                        let msg = alerts::fmt_profit(net_eth, net_usd, &tx_hash, block_no, &borrower, gas_eth, 0.0);
+                        let _ = alerts::send_telegram(msg, None, 0, true).await;
+                    });
                 }
             }
         } else {
@@ -249,6 +325,18 @@ impl HuntLoanEngine {
                         total_ms     = total_ms,
                         "Liquidation complete"
                     );
+
+                    // Profit alert
+                    let gas_eth  = result.gas_used as f64 * base_fee_wei as f64 / 1e18;
+                    let net_eth  = best_sim.net_profit_usd as f64 / eth_price as f64;
+                    let borrower = format!("{}", best_opp.borrower);
+                    let tx_hash  = format!("{}", result.tx_hash);
+                    let block_no = result.block_number;
+                    let net_usd  = best_sim.net_profit_usd as f64;
+                    tokio::spawn(async move {
+                        let msg = alerts::fmt_profit(net_eth, net_usd, &tx_hash, block_no, &borrower, gas_eth, 0.0);
+                        let _ = alerts::send_telegram(msg, None, 0, true).await;
+                    });
                 }
                 Err(e) => {
                     error!(
@@ -256,6 +344,14 @@ impl HuntLoanEngine {
                         error    = %e,
                         "Execution failed"
                     );
+
+                    // Failure alert
+                    let reason   = e.to_string();
+                    let borrower = format!("{}", best_opp.borrower);
+                    tokio::spawn(async move {
+                        let msg = alerts::fmt_failed(&reason, &borrower, 1, 3, "retry queued");
+                        let _ = alerts::send_telegram(msg, None, 0, false).await;
+                    });
                 }
             }
         }
@@ -263,4 +359,3 @@ impl HuntLoanEngine {
         Ok(())
     }
 }
-
