@@ -49,7 +49,7 @@ pub async fn find_opportunities(
     let provider = ProviderBuilder::new()
         .connect_http(cfg.rpc_http.parse()?);
 
-    let pool = IAavePool::new(cfg.aave_pool_addr, provider.clone());
+    let pool = IAavePool::new(crate::constants::AAVE_POOL, provider.clone());
 
     let mut opportunities = Vec::new();
 
