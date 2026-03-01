@@ -133,7 +133,7 @@ WebSocket block event
 
 | Component | Priority | Description |
 |---|---|---|
-| Deploy HuntLoanFlashReceiver.sol | — | `forge script script/Deploy.s.sol --rpc-url $RPC_URL --chain-id 8453` — set `HUNTLOAN_CONTRACT` after |
+| Deploy HuntLoanFlashReceiver.sol | — | ✅ Deployed `0x0A0fE1f59D56716aF5c4C9D7688df742EE5949D3` (Base mainnet, 2026-03-01) |
 
 ---
 
@@ -141,6 +141,7 @@ WebSocket block event
 
 | Name | Address |
 |---|---|
+| **HuntLoanFlashReceiver (active)** | **`0x0A0fE1f59D56716aF5c4C9D7688df742EE5949D3`** |
 | Aave V3 Pool | `0xA238Dd80C259a72e81d7e4664a9801593F98d1c5` |
 | Aave Data Provider | `0x2d8A3C5677189723C4cB8873CfC9C8976FDF38Ac` |
 | Aave PoolAddressesProvider | `0xe20fCBdBfFC4Dd138cE8b2E6FBb6CB49777ad64D` |

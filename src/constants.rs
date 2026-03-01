@@ -27,6 +27,9 @@ pub const USDC: Address = address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
 pub const MULTICALL3: Address = address!("cA11bde05977b3631167028862bE2a173976CA11");
 
 // ── Deployed contracts ─────────────────────────────────────────────────────
+/// HuntLoanFlashReceiver — deployed 2026-03-01 on Base mainnet
+pub const HUNTLOAN_FLASH_RECEIVER: Address =
+    address!("0A0fE1f59D56716aF5c4C9D7688df742EE5949D3");
 /// Legacy AbdulwahidFlashLiquidator V2 (fallback) — deployed 2026-02-28
 pub const LEGACY_FLASH_LIQUIDATOR: Address =
     address!("E5c3e80C243A6E21883E787013254BeAC829AD1E");
