@@ -219,23 +219,47 @@ INFO Liquidation complete tx_hash=0x... total_ms=...
 | `TELEGRAM_BOT_TOKEN` | No | — | Telegram bot token for alerts |
 | `TELEGRAM_CHAT_ID` | No | — | Telegram chat ID to send alerts |
 | `RUST_LOG` | No | `huntloan=info` | Logging level |
+| `ALERT_RATE_LIMIT_SECONDS` | No | `60` | Min seconds between FAILED/CIRCUIT alerts |
+| `SUMMARY_INTERVAL_SECONDS` | No | `3600` | Seconds between hourly summary alerts |
+| `STRONG_HF_THRESHOLD` | No | `1.0` | Skip if HF > this (1.0=disabled, 0.90=strict) |
+| `MIN_MARGIN_BPS` | No | `50` | Min profit margin (profit/debt×10000 bps) |
+| `MAX_DAILY_GAS_WEI` | No | disabled | Daily gas spend cap in wei |
+| `MAX_DAILY_BRIBE_WEI` | No | disabled | Daily bribe spend cap in wei |
+| `MAX_PARALLEL_SIMS` | No | `4` | Concurrent on-chain simulation calls |
+| `TARGET_COOLDOWN_SECONDS` | No | `300` | Blacklist duration for failed targets |
 
 ---
 
 ## Financial Safety Caps
 
-All caps are enforced in `gas.rs::validate_caps()`. The execution pipeline currently does
-**not** call `validate_caps()` before broadcast — this is manual confirmation before
-setting `DRY_RUN=false`. Future versions should add this gate.
+### Per-transaction caps (enforced by executor + gas.rs)
 
-| Parameter | Cap | Location |
+| Parameter | Cap | Env override |
 |---|---|---|
-| Gas cost per tx | 0.008 ETH | `MAX_GAS_COST_WEI` in constants.rs |
-| Sequencer bribe | 0.05 ETH | `MAX_BRIBE_WEI` in constants.rs |
-| Minimum net profit | $10 USD | `MIN_NET_PROFIT_USD` in constants.rs |
-| Minimum wallet ETH | 0.005 ETH | `MIN_WALLET_ETH` in constants.rs |
+| Gas cost per tx | 0.008 ETH | `MAX_GAS_COST_WEI` |
+| Sequencer bribe | 0.05 ETH | `MAX_BRIBE_WEI` |
+| Minimum net profit | $10 USD | `MIN_PROFIT_USD` |
+| Minimum wallet ETH | 0.005 ETH | `MIN_WALLET_ETH` (constants) |
 
-To override caps via environment:
+### Session caps — Phase 2 (enforced by engine.rs)
+
+| Parameter | Default | Env override |
+|---|---|---|
+| Daily gas budget | disabled | `MAX_DAILY_GAS_WEI` |
+| Daily bribe budget | disabled | `MAX_DAILY_BRIBE_WEI` |
+| Strong HF threshold | 1.0 (off) | `STRONG_HF_THRESHOLD` |
+| Min profit margin | 50 bps | `MIN_MARGIN_BPS` |
+| Target cooldown | 300 s | `TARGET_COOLDOWN_SECONDS` |
+
+**Recommended production caps:**
+```bash
+MAX_DAILY_GAS_WEI=50000000000000000    # 0.05 ETH/day gas cap
+MAX_DAILY_BRIBE_WEI=200000000000000000 # 0.2 ETH/day bribe cap
+STRONG_HF_THRESHOLD=0.95               # skip barely-underwater positions
+MIN_MARGIN_BPS=100                     # require 1% margin minimum
+```
+
+To tighten per-tx caps:
 ```bash
 MAX_GAS_COST_WEI=4000000000000000   # 0.004 ETH (tighter)
 MAX_BRIBE_WEI=25000000000000000     # 0.025 ETH (tighter)

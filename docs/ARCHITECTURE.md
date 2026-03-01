@@ -50,11 +50,21 @@ WebSocket block header received
         │
         ├─ 3. scanner::scan_warm()              [HF 1.07–1.15 → VelocityEngine]
         │
-        ├─ 4. simulator::simulate_on_chain()    [eth_call + gas estimate]
+        ├─ 4. [P2] blacklist filter + STRONG_HF_THRESHOLD filter
         │
-        └─ 5. executor::{execute | execute_parallel}
+        ├─ 5. [P3] score-sort candidates (1/HF × bonus × log-debt)
+        │
+        ├─ 6. [P3] simulator × N (parallel JoinSet, MAX_PARALLEL_SIMS=4)
+        │       └─ margin filter (MIN_MARGIN_BPS)
+        │
+        ├─ 7. [P2] daily budget pre-check (gas + bribe caps)
+        │
+        └─ 8. executor::{execute | execute_parallel}
                 ├─ DRY_RUN=true  → log + return (no tx sent)
-                └─ DRY_RUN=false → EIP-1559 tx → private RPC → Base mempool
+                ├─ SOFT_LIVE     → sign + print full preview + return
+                └─ LIVE          → EIP-1559 tx → Base mempool → receipt
+                      ├─ on success: fmt_executed alert + trades.csv row
+                      └─ on failure: blacklist target + fmt_failed_exec alert
 ```
 
 **Timing targets (Base, 2-second blocks):**
@@ -131,10 +141,18 @@ WebSocket block header received
 - Fallback: Binance REST API (`api.binance.com/api/v3/ticker/price`)
 - Returns cached value (< 60s old) or fetches fresh
 
-### `src/alerts.rs` — Telegram notifications
-- 8 message formatters: `fmt_critical`, `fmt_strike`, `fmt_profit`, `fmt_failed`, `fmt_watchlist`, `fmt_system_start`, `fmt_dry_run`, `fmt_velocity`
-- `send_telegram()` — non-blocking, deduplication key + TTL throttle
-- All alerts are `tokio::spawn`ed (never blocks the pipeline)
+### `src/alerts.rs` — Telegram notifications (Phase 1)
+- **4 alert classes only**: `fmt_executed`, `fmt_failed_exec`, `fmt_circuit_breaker`, `fmt_summary`
+- Arabic titles + icon prefix per class (🐺🔥 / 🐺❌ / 🚨 / 📊)
+- `AlertStats` global singleton (`OnceLock`) tracks blocks, opps, sims, execs, PnL
+- Per-category rate limiter via `throttle_guard()` (keyed on category + target)
+- Hourly summary fired from `engine.run()` loop every `SUMMARY_INTERVAL_SECONDS`
+- All alerts are `tokio::spawn`ed; never blocks the pipeline
+
+### `src/trades.rs` — CSV trade log (Phase 5)
+- Appends one row to `logs/trades.csv` per confirmed broadcast
+- Auto-creates `logs/` directory and CSV header on first write
+- 16 columns: timestamp, tx_hash, target, assets, financials, latencies
 
 ### `src/config.rs` — Runtime configuration
 - Reads from environment variables (`.env` file)
