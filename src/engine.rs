@@ -26,6 +26,7 @@ use crate::{
     constants::{self, PARALLEL_CONVICTION_USD},
     discovery,
     executor::HuntLoanExecutor,
+    gas,
     oracle,
     reserves::ReserveCache,
     scanner,
@@ -169,9 +170,23 @@ impl HuntLoanEngine {
             "Scan complete"
         );
 
-        // ── Feed velocity engine ─────────────────────────────────────────────
+        // ── Warm-zone scan → velocity engine ────────────────────────────────
+        // Run alongside the liquidatable pipeline. Cheap: Multicall3 only, no
+        // reserve resolution. Gives the velocity engine observations before a
+        // position crosses HF = 1.0 so ETA is meaningful when it matters.
+        let warm = scanner::scan_warm(
+            provider.as_ref(),
+            &self.config,
+            &candidates,
+        )
+        .await;
+
+        // Feed velocity engine from both warm candidates and liquidatable positions
         {
             let mut ve = self.velocity.lock().await;
+            for wc in &warm {
+                ve.record(wc.borrower, wc.health_factor);
+            }
             for opp in &opportunities {
                 ve.record(opp.borrower, opp.health_factor);
             }
@@ -255,16 +270,28 @@ impl HuntLoanEngine {
         // ── Stage 3: EXECUTE ─────────────────────────────────────────────────
         let exec_t = Instant::now();
 
+        // Compute gas tier + bribe for alert and logging
+        let gas_tier_sel = gas::select_tier(best_opp.health_factor, 30.0);
+        let gas_tier     = gas::compute_gas_tier(base_fee_wei, 1_000_000_000, gas_tier_sel, gas::Regime::Stable);
+        let max_fee_gwei = gas_tier.max_fee_per_gas as f64 / 1_000_000_000.0;
+        let max_pri_gwei = gas_tier.max_priority_fee as f64 / 1_000_000_000.0;
+
+        // Gross profit estimate in wei for bribe calculation
+        let gross_profit_wei: u128 = if eth_price > 0 {
+            (best_sim.net_profit_usd as f64 / eth_price as f64 * 1e18) as u128
+        } else { 0 };
+        let bribe_wei = gas::compute_bribe_wei(gross_profit_wei, gas_tier.bribe_fraction);
+        let bribe_eth = bribe_wei as f64 / 1e18;
+        let bribe_usd = bribe_eth * eth_price as f64;
+
         // Pre-execute strike alert (forced — fire for every execution attempt)
         {
-            let max_fee_gwei = base_fee_wei as f64 * 1.3 / 1_000_000_000.0; // STRIKE approx
-            let max_pri_gwei = 1.5; // 1 gwei priority
             let msg = alerts::fmt_strike(
                 &format!("{}", best_opp.borrower),
                 best_opp.health_factor,
                 "FLASH → UNISWAP V3",
-                0.0, // bribe not tracked per-tx yet
-                0.0,
+                bribe_eth,
+                bribe_usd,
                 max_fee_gwei,
                 max_pri_gwei,
             );
@@ -304,7 +331,7 @@ impl HuntLoanEngine {
                     let block_no = r.block_number;
                     let net_usd  = best_sim.net_profit_usd as f64;
                     tokio::spawn(async move {
-                        let msg = alerts::fmt_profit(net_eth, net_usd, &tx_hash, block_no, &borrower, gas_eth, 0.0);
+                        let msg = alerts::fmt_profit(net_eth, net_usd, &tx_hash, block_no, &borrower, gas_eth, bribe_eth);
                         let _ = alerts::send_telegram(msg, None, 0, true).await;
                     });
                 }
@@ -334,7 +361,7 @@ impl HuntLoanEngine {
                     let block_no = result.block_number;
                     let net_usd  = best_sim.net_profit_usd as f64;
                     tokio::spawn(async move {
-                        let msg = alerts::fmt_profit(net_eth, net_usd, &tx_hash, block_no, &borrower, gas_eth, 0.0);
+                        let msg = alerts::fmt_profit(net_eth, net_usd, &tx_hash, block_no, &borrower, gas_eth, bribe_eth);
                         let _ = alerts::send_telegram(msg, None, 0, true).await;
                     });
                 }

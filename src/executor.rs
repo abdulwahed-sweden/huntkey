@@ -116,7 +116,10 @@ impl HuntLoanExecutor {
             return (None, None);
         }
 
-        let url = match self.config.rpc_http.parse() {
+        let submit_url = self.config.private_rpc_http
+            .as_deref()
+            .unwrap_or(&self.config.rpc_http);
+        let url = match submit_url.parse() {
             Ok(u)  => u,
             Err(e) => { warn!("Parallel shot: invalid RPC URL: {}", e); return (None, None); }
         };
@@ -250,11 +253,14 @@ impl HuntLoanExecutor {
         const MAX_ATTEMPTS: u8 = 3;
         const FEE_BUMP_PCT: u128 = 15; // +15% per retry
 
+        // Use private RPC for submission when configured (MEV protection on Base)
+        let submit_url = self.config.private_rpc_http
+            .as_deref()
+            .unwrap_or(&self.config.rpc_http);
+
         let provider = ProviderBuilder::new()
             .wallet(self.wallet.clone())
-            .connect_http(
-                self.config.rpc_http.parse().wrap_err("RPC_URL invalid")?,
-            );
+            .connect_http(submit_url.parse().wrap_err("RPC_URL invalid")?);
 
         let nonce = self.acquire_nonce(&provider).await?;
 

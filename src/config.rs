@@ -11,8 +11,11 @@ use eyre::{Result, WrapErr};
 #[derive(Debug, Clone)]
 pub struct Config {
     // [NETWORK]
-    pub rpc_http:    String,          // RPC_URL
-    pub rpc_ws:      Option<String>,  // WS_RPC_URL — required for WS scanner
+    pub rpc_http:         String,          // RPC_URL
+    pub rpc_ws:           Option<String>,  // WS_RPC_URL — required for WS scanner
+    /// Private RPC for tx submission — when set, used instead of rpc_http for
+    /// broadcast calls. Provides Base MEV protection (no public mempool exposure).
+    pub private_rpc_http: Option<String>,  // PRIVATE_RPC_URL
 
     // [WALLET]
     pub operator_key: String,         // PRIVATE_KEY
@@ -54,6 +57,8 @@ impl Config {
             _ => None,
         };
 
+        let private_rpc_http = optional_env("PRIVATE_RPC_URL");
+
         let operator_key = std::env::var("PRIVATE_KEY")
             .wrap_err("PRIVATE_KEY is required")?;
 
@@ -92,6 +97,7 @@ impl Config {
         Ok(Self {
             rpc_http,
             rpc_ws,
+            private_rpc_http,
             operator_key,
             huntloan_addr,
             aave_pool,

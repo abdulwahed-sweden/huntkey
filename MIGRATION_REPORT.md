@@ -133,10 +133,7 @@ WebSocket block event
 
 | Component | Priority | Description |
 |---|---|---|
-| Flashbots private relay | **P2** | `alloy::providers::layers` Flashbots bundle submission for MEV protection on Base |
-| Warm-zone velocity feed | **P3** | Feed `VelocityEngine` from a separate warm-zone scan (HF 1.07–1.15) not just liquidatable positions |
-| Bribe tracking per-tx | **P3** | Expose gas tier bribe fraction to profit alert formatter |
-| Deploy HuntLoanFlashReceiver.sol | — | `forge script script/Deploy.s.sol --rpc-url $RPC_URL --chain-id 8453` |
+| Deploy HuntLoanFlashReceiver.sol | — | `forge script script/Deploy.s.sol --rpc-url $RPC_URL --chain-id 8453` — set `HUNTLOAN_CONTRACT` after |
 
 ---
 

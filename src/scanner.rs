@@ -64,6 +64,16 @@ sol! {
 /// Addresses batched per Multicall3 aggregate3() call.
 const MULTICALL_CHUNK: usize = 500;
 
+// ── Warm candidate ────────────────────────────────────────────────────────────
+
+/// A warm-zone position: HF above 1.0 but trending toward liquidation.
+/// Not executed — only fed to VelocityEngine for ETA tracking.
+#[derive(Debug, Clone)]
+pub struct WarmCandidate {
+    pub borrower:      Address,
+    pub health_factor: f64,
+}
+
 // ── Opportunity ───────────────────────────────────────────────────────────────
 
 /// A fully resolved liquidation opportunity ready for simulation + execution.
@@ -103,7 +113,7 @@ pub async fn scan<P: Provider>(
 
     for chunk in candidates.chunks(MULTICALL_CHUNK) {
         rpc_calls += 1;
-        match hf_chunk(provider, cfg, chunk).await {
+        match hf_chunk_full(provider, cfg, chunk).await {
             Ok(mut v) => liquidatable.append(&mut v),
             Err(e)    => warn!("HF chunk {} failed: {}", rpc_calls, e),
         }
@@ -183,10 +193,122 @@ pub async fn scan<P: Provider>(
     Ok(opportunities)
 }
 
+// ── Public API — warm-zone scan ───────────────────────────────────────────────
+
+/// Scan candidates for warm-zone positions: HF_HOT < HF < HF_WARM (1.07–1.15).
+///
+/// These positions are not yet liquidatable but are trending downward.
+/// Returns (address, hf) pairs for feeding into the VelocityEngine so ETA
+/// predictions are ready before the position crosses HF = 1.0.
+///
+/// No reserve resolution or profit math — intentionally cheap (Multicall3 only).
+pub async fn scan_warm<P: Provider>(
+    provider: &P,
+    cfg: &Config,
+    candidates: &[Address],
+) -> Vec<WarmCandidate> {
+    let mut warm = Vec::new();
+    for chunk in candidates.chunks(MULTICALL_CHUNK) {
+        match hf_batch_raw(provider, cfg, chunk).await {
+            Ok(v) => {
+                for (addr, hf, debt_usd) in v {
+                    // Warm zone: above liquidation but approaching
+                    if hf > 1.0
+                        && hf < constants::HF_WARM
+                        && debt_usd >= constants::GOLDILOCKS_MIN_DEBT_USD as u128
+                    {
+                        warm.push(WarmCandidate { borrower: addr, health_factor: hf });
+                    }
+                }
+            }
+            Err(e) => warn!("Warm HF chunk failed: {}", e),
+        }
+    }
+    warm
+}
+
 // ── Internal — Stage 1 batch ──────────────────────────────────────────────────
 
 /// Run one Multicall3 batch of getUserAccountData and return liquidatable entries.
 async fn hf_chunk<P: Provider>(
+    provider: &P,
+    cfg: &Config,
+    chunk: &[Address],
+) -> Result<Vec<(Address, f64, u128, u128)>> {
+    let raw = hf_batch_raw(provider, cfg, chunk).await?;
+    let mut out = Vec::new();
+    for (borrower, hf, debt_usd) in raw {
+        // Must be liquidatable
+        if hf >= 1.0 { continue; }
+
+        // Goldilocks filter: $5K – $500K
+        if debt_usd < constants::GOLDILOCKS_MIN_DEBT_USD as u128
+            || debt_usd > constants::GOLDILOCKS_MAX_DEBT_USD as u128
+        {
+            continue;
+        }
+
+        // Re-fetch coll_usd: stored in raw tuple would require change; compute here
+        // We approximate coll_usd from debt_usd × (1/hf) since getUserAccountData
+        // returns totalCollateralBase. We carry coll_usd through hf_batch_raw instead.
+        out.push((borrower, hf, debt_usd, 0_u128)); // coll_usd resolved in hf_batch_full
+    }
+    Ok(out)
+}
+
+/// Raw Multicall3 batch — returns (addr, hf, debt_usd) for every non-zero-debt
+/// address. No HF filtering applied; callers apply their own range logic.
+async fn hf_batch_raw<P: Provider>(
+    provider: &P,
+    cfg: &Config,
+    chunk: &[Address],
+) -> Result<Vec<(Address, f64, u128)>> {
+    let calls: Vec<IMulticall3::Call3> = chunk
+        .iter()
+        .map(|&addr| IMulticall3::Call3 {
+            target:       cfg.aave_pool,
+            allowFailure: true,
+            callData:     Bytes::from(
+                IAavePool::getUserAccountDataCall { user: addr }.abi_encode(),
+            ),
+        })
+        .collect();
+
+    let mc      = IMulticall3::new(constants::MULTICALL3, provider);
+    let results = mc.aggregate3(calls).call().await?;
+
+    let mut out = Vec::new();
+
+    for (&borrower, result) in chunk.iter().zip(results.iter()) {
+        if !result.success || result.returnData.is_empty() {
+            continue;
+        }
+        let data =
+            match IAavePool::getUserAccountDataCall::abi_decode_returns(&result.returnData) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+        // HF 18-dec fixed-point
+        let hf_raw: u128 = match data.healthFactor.try_into() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if hf_raw == 0 { continue; }
+
+        let hf: f64  = hf_raw as f64 / 1e18;
+        let debt_usd = data.totalDebtBase.try_into().unwrap_or(0_u128) / 100; // 8-dec → 6-dec
+
+        if debt_usd == 0 { continue; }
+
+        out.push((borrower, hf, debt_usd));
+    }
+
+    Ok(out)
+}
+
+/// Full HF batch including collateral USD — used by the liquidatable pipeline.
+async fn hf_chunk_full<P: Provider>(
     provider: &P,
     cfg: &Config,
     chunk: &[Address],
@@ -217,7 +339,6 @@ async fn hf_chunk<P: Provider>(
                 Err(_) => continue,
             };
 
-        // HF 18-dec fixed-point; < 1e18 = liquidatable
         let hf_raw: u128 = match data.healthFactor.try_into() {
             Ok(v) => v,
             Err(_) => continue,
@@ -227,7 +348,7 @@ async fn hf_chunk<P: Provider>(
         }
 
         let hf: f64   = hf_raw as f64 / 1e18;
-        let debt_usd  = data.totalDebtBase.try_into().unwrap_or(0_u128) / 100; // 8-dec → 6-dec
+        let debt_usd  = data.totalDebtBase.try_into().unwrap_or(0_u128) / 100;
         let coll_usd  = data.totalCollateralBase.try_into().unwrap_or(0_u128) / 100;
 
         if debt_usd == 0 || coll_usd == 0 { continue; }
