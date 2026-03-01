@@ -20,6 +20,7 @@ use tracing::{error, info, warn};
 use crate::{
     config::Config,
     executor::HuntLoanExecutor,
+    oracle,
     scanner,
     simulator,
 };
@@ -97,7 +98,7 @@ impl HuntLoanEngine {
         base_fee_wei: u128,
         block_start: Instant,
     ) -> Result<()> {
-        let eth_price = fetch_eth_price_usd();
+        let eth_price = oracle::fetch_eth_price_usd(provider.as_ref()).await;
 
         // ── Stage 1: SCAN ────────────────────────────────────────────────────
         let scan_t = Instant::now();
@@ -201,8 +202,3 @@ impl HuntLoanEngine {
     }
 }
 
-/// ETH price oracle stub.
-/// TODO: replace with Chainlink on-chain read or Binance REST.
-pub fn fetch_eth_price_usd() -> u128 {
-    2_000
-}

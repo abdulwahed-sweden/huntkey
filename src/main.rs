@@ -11,6 +11,7 @@ mod engine;
 mod executor;
 mod gas;
 mod math;
+mod oracle;
 mod scanner;
 mod simulator;
 

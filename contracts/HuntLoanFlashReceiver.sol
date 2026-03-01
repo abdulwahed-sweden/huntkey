@@ -8,10 +8,52 @@ import {IERC20}                       from "@openzeppelin/contracts/token/ERC20/
 import {SafeERC20}                    from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable}                      from "@openzeppelin/contracts/access/Ownable.sol";
 
+// ── DEX interfaces (inline — no extra package dependency) ───────────────────
+
+/// @dev Uniswap V3 SwapRouter02 — exactInputSingle only
+interface IUniswapV3Router {
+    struct ExactInputSingleParams {
+        address tokenIn;
+        address tokenOut;
+        uint24  fee;
+        address recipient;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+        uint160 sqrtPriceLimitX96;
+    }
+    function exactInputSingle(ExactInputSingleParams calldata params)
+        external payable returns (uint256 amountOut);
+}
+
+/// @dev Aerodrome Router (Solidly fork) — swapExactTokensForTokens only
+interface IAerodromeRouter {
+    struct Route {
+        address from;
+        address to;
+        bool    stable;
+        address factory;
+    }
+    function swapExactTokensForTokens(
+        uint256        amountIn,
+        uint256        amountOutMin,
+        Route[] calldata routes,
+        address        to,
+        uint256        deadline
+    ) external returns (uint256[] memory amounts);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * @title  HuntLoanFlashReceiver
  * @notice Aave V3 flash-loan liquidation contract for the HuntLoan execution engine.
  *         Executes undercollateralised position liquidations on Base mainnet.
+ *
+ * Swap routing (in priority order):
+ *   1. Uniswap V3 — fee tiers 500 (0.05%), 3000 (0.3%), 10000 (1%)
+ *   2. Aerodrome   — volatile pool
+ *   3. Aerodrome   — stable pool
+ *   Reverts with SwapFailed() if no route returns >= minAmountOut.
  *
  * Investment terms (immutable, set at deploy):
  *   - Capital deposited by the Financier.
@@ -23,6 +65,12 @@ import {Ownable}                      from "@openzeppelin/contracts/access/Ownab
  */
 contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable {
     using SafeERC20 for IERC20;
+
+    // ── DEX addresses (Base mainnet — immutable) ─────────────────────────────
+
+    address private constant UNISWAP_ROUTER    = 0x2626664c2603336E57B271c5C0b26F421741e481;
+    address private constant AERODROME_ROUTER  = 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
+    address private constant AERODROME_FACTORY = 0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
 
     // ── Investment parameters ────────────────────────────────────────────────
 
@@ -52,6 +100,7 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable {
         uint256 profit
     );
     event ProfitDistributed(uint256 financierShare, uint256 operatorShare);
+    event SwapRouteUsed(address tokenIn, address tokenOut, string route, uint256 amountOut);
 
     // ── Errors ───────────────────────────────────────────────────────────────
 
@@ -59,7 +108,8 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable {
     error ContractSettled();
     error OnlyAavePool();
     error LiquidationUnprofitable(uint256 received, uint256 owed);
-    error SwapNotImplemented();
+    /// Raised when all swap routes (Uniswap V3 + Aerodrome) fail or return < minAmountOut.
+    error SwapFailed(address tokenIn, address tokenOut, uint256 amountIn, uint256 minOut);
 
     // ── Constructor ──────────────────────────────────────────────────────────
 
@@ -99,26 +149,18 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable {
         if (msg.sender != operator) revert OnlyOperator();
         if (settled) revert ContractSettled();
 
-        // Store context for the executeOperation callback
         _pendingDebtAsset        = debtAsset;
         _pendingCollateralAsset  = collateralAsset;
         _pendingBorrower         = borrower;
 
-        // Trigger Aave flash loan — executeOperation is called synchronously
-        POOL.flashLoanSimple(
-            address(this),
-            debtAsset,
-            debtAmount,
-            "",
-            0
-        );
+        POOL.flashLoanSimple(address(this), debtAsset, debtAmount, "", 0);
     }
 
     // ── Aave V3 callback ─────────────────────────────────────────────────────
 
     /**
      * @dev Called by Aave immediately after flash loan funds are transferred.
-     *      Liquidates the borrower, swaps collateral to debt token, repays loan.
+     *      Liquidates the borrower, routes collateral swap, repays loan.
      *      Any surplus above (amount + premium) stays in contract as profit.
      */
     function executeOperation(
@@ -141,16 +183,19 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable {
         POOL.liquidationCall(collateralAsset, asset, borrower, amount, false);
         uint256 collSeized = IERC20(collateralAsset).balanceOf(address(this)) - collBefore;
 
-        // 3. Swap seized collateral → debtAsset to repay the flash loan
-        //    Integrate Uniswap V3 SwapRouter or Aerodrome here (see TODO).
-        uint256 received = _swapCollateralToDebt(collateralAsset, asset, collSeized);
-
-        // 4. Verify profitability and repay flash loan (amount + Aave premium)
+        // 3. Amount owed to Aave: principal + 0.05% premium
         uint256 owed = amount + premium;
+
+        // 4. Swap collateral → debt token; must return at least `owed`
+        uint256 received = _swapCollateralToDebt(collateralAsset, asset, collSeized, owed);
+
+        // 5. Safety check (swap already enforces minAmountOut = owed)
         if (received < owed) revert LiquidationUnprofitable(received, owed);
+
+        // 6. Approve Aave to pull repayment
         IERC20(asset).approve(address(POOL), owed);
 
-        // 5. Accumulate net profit
+        // 7. Accumulate net profit
         uint256 profit = received - owed;
         totalProfit += profit;
 
@@ -167,8 +212,7 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable {
 
     /**
      * @notice Distribute profits after the 6-month maturity period.
-     *         Anyone can trigger this to finalise the investment agreement.
-     *         Financier receives capital + 60% profit; operator receives 40% profit.
+     *         Anyone can trigger to finalise the investment agreement.
      */
     function settle() external {
         require(block.timestamp >= maturityTime, "HuntLoan: not yet matured");
@@ -180,7 +224,6 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable {
         uint256 operatorShare;
 
         if (balance <= capital) {
-            // Loss scenario: financier recovers what remains, operator gets nothing
             financierShare = balance;
             operatorShare  = 0;
         } else {
@@ -197,27 +240,106 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable {
 
     // ── Emergency recovery ───────────────────────────────────────────────────
 
-    /**
-     * @notice Withdraw any ERC-20 token accidentally sent to this contract.
-     *         Only callable by operator (owner), only before settlement.
-     */
     function rescueToken(address token, uint256 amount) external onlyOwner {
         if (settled) revert ContractSettled();
         IERC20(token).safeTransfer(operator, amount);
     }
 
-    // ── Internal — DEX swap stub ─────────────────────────────────────────────
+    // ── Internal — DEX swap with route fallback ──────────────────────────────
 
     /**
-     * @dev Swap `amount` of `collateral` token into `debt` token.
-     *      TODO: Implement via Uniswap V3 SwapRouter (0x2626664c...) or
-     *            Aerodrome Router (0xcF77a3Ba...) on Base mainnet.
+     * @dev Swap `amountIn` of `collateral` → `debt`.
+     *
+     *      Route priority:
+     *        1. Uniswap V3 fee=500   (stablecoin / tight pairs)
+     *        2. Uniswap V3 fee=3000  (most ETH-paired assets)
+     *        3. Uniswap V3 fee=10000 (long-tail assets)
+     *        4. Aerodrome volatile pool
+     *        5. Aerodrome stable pool
+     *
+     *      The first route that returns >= minAmountOut is used.
+     *      Reverts SwapFailed if no route succeeds.
+     *
+     * @param collateral   Token received from Aave liquidation.
+     * @param debt         Token to return to repay the flash loan.
+     * @param amountIn     Amount of collateral to swap.
+     * @param minAmountOut Minimum acceptable output (= flash loan owed amount).
+     * @return amountOut   Actual tokens received after swap.
      */
     function _swapCollateralToDebt(
-        address /*collateral*/,
-        address /*debt*/,
-        uint256 /*amount*/
-    ) internal pure returns (uint256) {
-        revert SwapNotImplemented();
+        address collateral,
+        address debt,
+        uint256 amountIn,
+        uint256 minAmountOut
+    ) internal returns (uint256 amountOut) {
+
+        // ── Route 1-3: Uniswap V3 ────────────────────────────────────────────
+        IERC20(collateral).approve(UNISWAP_ROUTER, amountIn);
+
+        uint24[3] memory feeTiers = [uint24(500), uint24(3000), uint24(10000)];
+        for (uint256 i = 0; i < 3; i++) {
+            try IUniswapV3Router(UNISWAP_ROUTER).exactInputSingle(
+                IUniswapV3Router.ExactInputSingleParams({
+                    tokenIn:           collateral,
+                    tokenOut:          debt,
+                    fee:               feeTiers[i],
+                    recipient:         address(this),
+                    amountIn:          amountIn,
+                    amountOutMinimum:  minAmountOut,
+                    sqrtPriceLimitX96: 0
+                })
+            ) returns (uint256 out) {
+                // Success — reset approval and return
+                IERC20(collateral).approve(UNISWAP_ROUTER, 0);
+                emit SwapRouteUsed(collateral, debt, _feeLabel(feeTiers[i]), out);
+                return out;
+            } catch { /* try next tier */ }
+        }
+        IERC20(collateral).approve(UNISWAP_ROUTER, 0); // reset if all tiers failed
+
+        // ── Routes 4-5: Aerodrome (volatile then stable) ─────────────────────
+        IERC20(collateral).approve(AERODROME_ROUTER, amountIn);
+
+        IAerodromeRouter.Route[] memory routes = new IAerodromeRouter.Route[](1);
+        routes[0] = IAerodromeRouter.Route({
+            from:    collateral,
+            to:      debt,
+            stable:  false,
+            factory: AERODROME_FACTORY
+        });
+
+        // Volatile pool
+        try IAerodromeRouter(AERODROME_ROUTER).swapExactTokensForTokens(
+            amountIn, minAmountOut, routes, address(this), block.timestamp + 120
+        ) returns (uint256[] memory amounts) {
+            if (amounts.length > 0 && amounts[amounts.length - 1] >= minAmountOut) {
+                IERC20(collateral).approve(AERODROME_ROUTER, 0);
+                emit SwapRouteUsed(collateral, debt, "AERODROME_VOLATILE", amounts[amounts.length - 1]);
+                return amounts[amounts.length - 1];
+            }
+        } catch { /* try stable */ }
+
+        // Stable pool
+        routes[0].stable = true;
+        try IAerodromeRouter(AERODROME_ROUTER).swapExactTokensForTokens(
+            amountIn, minAmountOut, routes, address(this), block.timestamp + 120
+        ) returns (uint256[] memory amounts) {
+            if (amounts.length > 0 && amounts[amounts.length - 1] >= minAmountOut) {
+                IERC20(collateral).approve(AERODROME_ROUTER, 0);
+                emit SwapRouteUsed(collateral, debt, "AERODROME_STABLE", amounts[amounts.length - 1]);
+                return amounts[amounts.length - 1];
+            }
+        } catch { /* all routes failed */ }
+
+        IERC20(collateral).approve(AERODROME_ROUTER, 0);
+        revert SwapFailed(collateral, debt, amountIn, minAmountOut);
+    }
+
+    /// @dev Human-readable label for Uniswap fee tier (for event logging).
+    function _feeLabel(uint24 fee) private pure returns (string memory) {
+        if (fee == 500)   return "UNISWAP_V3_0.05%";
+        if (fee == 3000)  return "UNISWAP_V3_0.3%";
+        if (fee == 10000) return "UNISWAP_V3_1%";
+        return "UNISWAP_V3_UNKNOWN";
     }
 }
