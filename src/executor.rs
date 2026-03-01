@@ -344,6 +344,21 @@ impl HuntLoanExecutor {
             .wallet(self.wallet.clone())
             .connect_http(submit_url.parse().wrap_err("RPC_URL invalid")?);
 
+        // Micro-bankroll gate: refuse broadcast if wallet is below safety floor.
+        // get_balance failure is non-fatal — we log and allow (balance unknown ≠ zero).
+        let balance_wei = provider
+            .get_balance(self.signer_address)
+            .await
+            .map(|b| b.to::<u128>())
+            .unwrap_or(u128::MAX); // unknown balance → allow execution
+        if balance_wei < self.config.min_wallet_eth_wei {
+            bail!(
+                "Wallet {:.6} ETH below safety floor {:.6} ETH — refusing broadcast to preserve capital",
+                balance_wei as f64 / 1e18,
+                self.config.min_wallet_eth_wei as f64 / 1e18,
+            );
+        }
+
         let nonce = self.acquire_nonce(&provider).await?;
 
         for attempt in 0_u8..MAX_ATTEMPTS {

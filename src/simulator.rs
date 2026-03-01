@@ -125,7 +125,17 @@ pub async fn simulate_on_chain<P: Provider>(
 
     let gas_cost_adj = gas_est as u128 * base_fee_wei * eth_price_usd
         / 1_000_000_000_000_000_000u128;
-    let net = sim.gross_usd as i128
+
+    // Slippage buffer: reduce gross by SLIPPAGE_BUFFER_BPS to account for price
+    // drift between eth_call time and actual broadcast (~200-400ms on Base).
+    // 0 bps = no adjustment (default). 2500 = 25% haircut.
+    let gross_adj = if config.slippage_buffer_bps > 0 {
+        sim.gross_usd.saturating_mul(10_000 - config.slippage_buffer_bps as u128) / 10_000
+    } else {
+        sim.gross_usd
+    };
+
+    let net = gross_adj as i128
         - sim.flash_fee_usd as i128
         - gas_cost_adj as i128;
 

@@ -67,6 +67,15 @@ pub struct Config {
     /// Seconds a failed target stays blacklisted before retry. Default: 300.
     pub target_cooldown_secs: u64,    // TARGET_COOLDOWN_SECONDS
 
+    // [MICRO-BANKROLL SURVIVAL]
+    /// Reduce expected gross profit by this many bps before the post-sim profitability check.
+    /// Accounts for price drift between eth_call simulation and actual broadcast (~200-400ms).
+    /// 0 = disabled (default). 2500 = 25% haircut (recommended for small bankroll).
+    pub slippage_buffer_bps: u64,     // SLIPPAGE_BUFFER_BPS
+    /// Refuse broadcast if wallet ETH balance (wei) is below this floor.
+    /// Default: 5_000_000_000_000_000 (0.005 ETH). Engine logs warning and skips execution.
+    pub min_wallet_eth_wei: u128,     // MIN_WALLET_ETH_WEI
+
     // [CHAIN]
     pub chain_id: u64,                // 8453 (Base mainnet, hardcoded)
 }
@@ -188,6 +197,16 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(300_u64);
 
+        let slippage_buffer_bps = std::env::var("SLIPPAGE_BUFFER_BPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0_u64); // 0 = disabled; 2500 = 25% haircut recommended
+
+        let min_wallet_eth_wei = std::env::var("MIN_WALLET_ETH_WEI")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5_000_000_000_000_000_u128); // 0.005 ETH floor
+
         Ok(Self {
             rpc_http,
             rpc_ws,
@@ -214,6 +233,8 @@ impl Config {
             max_daily_bribe_wei,
             max_parallel_sims,
             target_cooldown_secs,
+            slippage_buffer_bps,
+            min_wallet_eth_wei,
             chain_id: 8453,
         })
     }
