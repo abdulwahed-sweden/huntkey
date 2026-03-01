@@ -122,27 +122,82 @@ as "not profitable" and skips.
 
 ---
 
-## Phase 5 — SOFT_LIVE (Pending)
+## Phase 5 — SOFT_LIVE
 
-> Run after reviewing DRY_RUN output. Expected: tx preview printed with calldata, nonce,
-> gas params, and explicit "NOT broadcast" marker.
+**Status: PASS** (2026-03-01 ~21:32 UTC)
+
+Config: `DRY_RUN=false`, `SOFT_LIVE=true`
+
+| Field | Value |
+|---|---|
+| chain_id | 8453 (Base) |
+| nonce (preview) | 7 |
+| max_fee_wei | 11,109,007 |
+| max_fee_mgwei | 11 |
+| gas_limit | 856,232 |
+| calldata | 132 bytes (requestFlashLiquidation) |
+| borrower | 0x63Be30EF1B7370Bb3CBd9613951F440854Cc9e8E |
+| est. profit | $727 |
+| broadcast | **NOT broadcast** (SOFT_LIVE marker confirmed in log) |
 
 ---
 
-## Phase 6 — LIVE_CONTROLLED Session #1 (Pending)
+## Phase 6 — LIVE_CONTROLLED Session #1
 
-> Only after Phase 5 PASS. Caps: MAX_GAS_COST_WEI=2000000000000000, MAX_BRIBE_WEI=5000000000000000, MIN_PROFIT_USD=20.
+**Status: 3 txs confirmed** (2026-03-01 21:33–21:35 UTC, ~90 seconds)
+
+Config: `DRY_RUN=false`, `SOFT_LIVE=false`, `MIN_PROFIT_USD=20`, `MAX_GAS_COST_WEI=2000000000000000`, `MAX_BRIBE_WEI=5000000000000000`
+
+### Transactions
+
+| # | Borrower | Nonce | Block | gasUsed | Sim. Net Profit | Tx Hash |
+|---|---|---|---|---|---|---|
+| 1 | 0x63Be30EF... | 6 | 42,805,747 | 548,337 | **$727** | [`0x29daf62e...`](https://basescan.org/tx/0x29daf62ed608b244a2836f9d164859d3c5f2c47ec790935ec8fe9d7afc5de895) |
+| 2 | 0x22A3066... | 7 | 42,805,762 | 614,355 | **$505** | [`0x375a35ad...`](https://basescan.org/tx/0x375a35ad57c31b7dc225c0e6cc67ac7a103012c962041e38425a894d19e40bad) |
+| 3 | 0x243Adb3a... | 8 | 42,805,777 | 521,610 | **$287** | [`0x4fdec494...`](https://basescan.org/tx/0x4fdec494f5d2c1ec7b9cf1abf5a6d3e2ce5cc82adba6e2c2edf4c27b6e54d095) |
+
+All 3: `status=1` (success), circuit breaker not triggered, send latency ~7.5 s.
+
+### Aggregate
+
+| Metric | Value |
+|---|---|
+| Total txs | **3** |
+| All confirmed | **yes (status=1)** |
+| Total gasUsed | **1,684,302** |
+| Base fee (actual, from WS) | ~6.3M wei (0.0063 gwei) |
+| Total gas cost (ETH) | ~0.0106 ETH (1,684,302 × 6.3M wei) |
+| Total sim. net profit | **$1,519** (already net of gas + flash premium) |
+| Gas overestimate margin | ~20% (e.g., est 712K vs actual 548K for tx1) |
+| Circuit breaker trips | 0 |
+| WS disconnects | 0 |
+| Execution latency (med.) | ~7.6 s (send → confirmed) |
+
+### Post-execution scan behaviour
+
+After the 3 liquidations, opportunity count dropped 155 → 153 (liquidated positions removed).
+Subsequent scans find 153 candidates but no further txs — remaining positions are unprofitable
+after gas at current caps or revert at the swap stage (see revert codes below).
+
+### Revert codes observed
+
+| Code | Selector | Meaning |
+|---|---|---|
+| `0xb629b0e4` | `MustNotLeaveDust()` | Position too small / flash fee exceeds bonus |
+| `0xc464e4ed` | `SwapFailed(address,address,uint256,uint256)` | Uniswap V3 pool illiquid for this pair; swap reverted |
+
+`SwapFailed` appears for WETH→USDC swaps where pool depth is insufficient for the required
+output amount. Not a bot bug — contract correctly reverts and bot skips to next candidate.
 
 ---
 
 ## Next Steps
 
-### Immediate (before SOFT_LIVE)
+### Immediate (Phase 7 iteration)
 
-1. **Investigate `0x27e1f1e5` reverts in simulation** — confirm these are all HF-not-below-threshold vs
-   any contract ABI mismatch. Decode a sample revert on-chain.
-2. **Confirm at least one position reaches HF < 1.0** in simulation before going SOFT_LIVE.
-   (If no profitable sim in 24h DRY_RUN, need to check profit threshold and collateral oracle.)
+1. **G-1 — Parallel Multicall3 batching** (highest ROI): Stage-1 drops 15.9 s → ~4 s, enabling per-block scanning.
+2. **G-4 — SwapFailed recovery**: Try alternative fee tiers (500, 3000, 10000) when 0.05% pool reverts.
+3. **Raise caps cautiously**: MIN_PROFIT_USD=20 is filtering profitable opportunities. Evaluate lower threshold (e.g. $5) after confirming profit accounting accuracy.
 
 ### G-1 (highest ROI optimization)
 
