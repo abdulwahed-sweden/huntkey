@@ -137,6 +137,56 @@ WebSocket block event
 
 ---
 
+## Phase 4 — Pre-Mainnet Audit + Old System Decommission
+
+Date: 2026-03-01
+
+### Audit Outcome
+
+Full internal audit completed covering:
+- Flash loan flow correctness (Solidity)
+- Swap cascade safety (5-route fallback, approval hygiene)
+- Executor correctness (DRY_RUN guard, nonce management, retry logic)
+- Risk analysis (14 financial risks, 7 operational risks, 6 smart contract risks)
+- Dry run validation
+
+**Verdict:** ⚠️ LIMITED LIVE TESTING RECOMMENDED
+
+See `docs/PRODUCTION_READY.md` for full findings.
+
+### Open Risk Items
+
+| ID | Severity | Description |
+|---|---|---|
+| RISK-01 | Medium | Simulator hardcodes 500bps liquidation bonus — actual per-reserve bonus not plumbed in |
+| RISK-02 | Low | Gas regime always `Stable` — `detect_regime()` not wired to price feed |
+| RISK-03 | Low | Direct swap pairs only — multi-hop routing not supported |
+| RISK-04 | Low | `hf_chunk()` in scanner.rs is dead code |
+
+### Decommission Plan
+
+Old system (Bitcoin-Sentinel Node.js bot) runs on DigitalOcean VPS 159.89.21.106.
+It shares the same private key as HuntLoan.
+
+**Required before DRY_RUN=false:**
+1. SSH to 159.89.21.106 and run: `pm2 stop mev-bot && pm2 delete mev-bot && pm2 save --force`
+2. Verify nonce stability: `cast nonce 0x3011BfD673a9D09f9761203A7fFCca757Af22587 --rpc-url $RPC_URL`
+3. Archive old repo: `cp -r /root/Bitcoin-Sentinel /home/santous/archive/bitcoin-sentinel-$(date +%Y%m%d)`
+
+Full procedure: `docs/DECOMMISSION_OLD_SYSTEM.md`
+
+### Documentation Created (2026-03-01)
+
+| File | Description |
+|---|---|
+| `README.md` | Investor-grade project overview |
+| `docs/ARCHITECTURE.md` | Full module reference + pipeline diagram |
+| `docs/PRODUCTION_READY.md` | Full audit report + readiness verdict |
+| `docs/SAFETY_GUIDE.md` | Pre-launch checklist + monitoring + emergency stop |
+| `docs/DECOMMISSION_OLD_SYSTEM.md` | Old system shutdown procedure |
+
+---
+
 ## Key Address Reference (Base Mainnet)
 
 | Name | Address |

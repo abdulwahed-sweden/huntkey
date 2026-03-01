@@ -7,10 +7,11 @@ use std::time::Instant;
 
 use alloy::{
     network::EthereumWallet,
-    primitives::{Address, TxHash, U256},
+    primitives::{Address, Bytes, TxHash, U256},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
     sol,
+    sol_types::SolCall,
 };
 use eyre::{bail, Result, WrapErr};
 use tokio::sync::Mutex;
@@ -112,6 +113,40 @@ impl HuntLoanExecutor {
                 strike_gwei   = gt_s.max_fee_per_gas / 1_000_000_000,
                 kill_gwei     = gt_k.max_fee_per_gas / 1_000_000_000,
                 "DRY_RUN — parallel dual-shot NOT sent"
+            );
+            return (None, None);
+        }
+
+        // SOFT_LIVE parallel preview — print both shots, send neither
+        if self.config.soft_live {
+            let calldata = Bytes::from(
+                IHuntLoanReceiver::requestFlashLiquidationCall {
+                    debtAsset:       opp.debt_asset,
+                    debtAmount:      U256::from(opp.debt_to_repay),
+                    collateralAsset: opp.collateral_asset,
+                    borrower:        opp.borrower,
+                }
+                .abi_encode(),
+            );
+            info!(
+                mode              = "SOFT_LIVE",
+                shot              = "STRIKE",
+                to                = %self.config.huntloan_addr,
+                max_fee_gwei      = gt_s.max_fee_per_gas / 1_000_000_000,
+                max_priority_gwei = gt_s.max_priority_fee / 1_000_000_000,
+                gas_limit         = gl,
+                calldata          = %calldata,
+                "SOFT_LIVE — dual-shot STRIKE preview (NOT broadcast)"
+            );
+            info!(
+                mode              = "SOFT_LIVE",
+                shot              = "KILL",
+                to                = %self.config.huntloan_addr,
+                max_fee_gwei      = gt_k.max_fee_per_gas / 1_000_000_000,
+                max_priority_gwei = gt_k.max_priority_fee / 1_000_000_000,
+                gas_limit         = gl,
+                calldata          = %calldata,
+                "SOFT_LIVE — dual-shot KILL preview (NOT broadcast)"
             );
             return (None, None);
         }
@@ -230,6 +265,51 @@ impl HuntLoanExecutor {
                 max_fee_gwei = fees.max_fee_per_gas / 1_000_000_000,
                 gas_limit = fees.gas_limit,
                 "DRY_RUN — tx NOT sent"
+            );
+            return Ok(ExecutionResult {
+                tx_hash:         TxHash::ZERO,
+                block_number:    0,
+                gas_used:        0,
+                send_latency_ms: t.elapsed().as_millis() as u64,
+            });
+        }
+
+        // ── SOFT_LIVE: resolve nonce, encode calldata, print full tx preview ──
+        // No transaction is sent. Use this to validate fees and calldata before
+        // committing to a live broadcast.
+        if self.config.soft_live {
+            let provider = ProviderBuilder::new()
+                .wallet(self.wallet.clone())
+                .connect_http(self.config.rpc_http.parse().wrap_err("RPC_URL invalid")?);
+            let nonce = self.acquire_nonce(&provider).await.unwrap_or(u64::MAX);
+
+            let calldata = Bytes::from(
+                IHuntLoanReceiver::requestFlashLiquidationCall {
+                    debtAsset:        opp.debt_asset,
+                    debtAmount:       U256::from(opp.debt_to_repay),
+                    collateralAsset:  opp.collateral_asset,
+                    borrower:         opp.borrower,
+                }
+                .abi_encode(),
+            );
+
+            info!(
+                mode              = "SOFT_LIVE",
+                to                = %self.config.huntloan_addr,
+                chain_id          = self.config.chain_id,
+                nonce             = nonce,
+                max_fee_gwei      = fees.max_fee_per_gas / 1_000_000_000,
+                max_priority_gwei = fees.max_priority_fee / 1_000_000_000,
+                gas_limit         = fees.gas_limit,
+                value_wei         = 0,
+                calldata_bytes    = calldata.len(),
+                calldata          = %calldata,
+                borrower          = %opp.borrower,
+                debt_to_repay     = opp.debt_to_repay,
+                collateral        = %opp.collateral_asset,
+                debt_asset        = %opp.debt_asset,
+                estimated_profit  = sim.net_profit_usd,
+                "SOFT_LIVE — full tx preview (NOT broadcast)"
             );
             return Ok(ExecutionResult {
                 tx_hash:         TxHash::ZERO,

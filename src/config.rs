@@ -30,10 +30,18 @@ pub struct Config {
 
     // [BOT SETTINGS]
     pub watchlist_path:   String,     // WATCHLIST_PATH
-    pub dry_run:          bool,       // DRY_RUN
+    pub dry_run:          bool,       // DRY_RUN — default TRUE (fail-safe)
+    /// Sign + print full tx preview, do NOT broadcast. Requires DRY_RUN=false.
+    pub soft_live:        bool,       // SOFT_LIVE — preview mode
     pub min_profit_usd:   f64,        // MIN_PROFIT_USD
     pub max_gas_cost_wei: u128,       // MAX_GAS_COST_WEI
     pub max_bribe_wei:    u128,       // MAX_BRIBE_WEI
+
+    // [CIRCUIT BREAKER]
+    /// Engine stops after this many consecutive execution reverts. Default: 3.
+    pub max_consecutive_reverts: u32, // MAX_CONSECUTIVE_REVERTS
+    /// Engine stops after this many consecutive RPC-level errors (scan/sim). Default: 10.
+    pub max_rpc_errors: u32,          // MAX_RPC_ERRORS
 
     // [CHAIN]
     pub chain_id: u64,                // 8453 (Base mainnet, hardcoded)
@@ -75,7 +83,14 @@ impl Config {
         let watchlist_path = std::env::var("WATCHLIST_PATH")
             .unwrap_or_else(|_| "watchlist.json".to_string());
 
+        // Safety default: true. Must explicitly set DRY_RUN=false to go live.
         let dry_run = std::env::var("DRY_RUN")
+            .map(|v| !(v.eq_ignore_ascii_case("false") || v == "0"))
+            .unwrap_or(true);
+
+        // SOFT_LIVE: sign tx and print full preview, but do NOT broadcast.
+        // Only active when DRY_RUN=false. Use SOFT_LIVE=true as an intermediate step.
+        let soft_live = std::env::var("SOFT_LIVE")
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
             .unwrap_or(false);
 
@@ -94,6 +109,16 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(50_000_000_000_000_000_u128); // 0.05 ETH
 
+        let max_consecutive_reverts = std::env::var("MAX_CONSECUTIVE_REVERTS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3_u32);
+
+        let max_rpc_errors = std::env::var("MAX_RPC_ERRORS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_u32);
+
         Ok(Self {
             rpc_http,
             rpc_ws,
@@ -105,9 +130,12 @@ impl Config {
             telegram_chat_id,
             watchlist_path,
             dry_run,
+            soft_live,
             min_profit_usd,
             max_gas_cost_wei,
             max_bribe_wei,
+            max_consecutive_reverts,
+            max_rpc_errors,
             chain_id: 8453,
         })
     }

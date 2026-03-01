@@ -11,11 +11,12 @@
 ///   - VelocityEngine records HF per borrower to compute ETA
 ///
 /// Replaces the 400ms polling loop from the legacy Node.js bot.
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
-use eyre::{Result, WrapErr};
+use eyre::{bail, Result, WrapErr};
 use futures_util::StreamExt;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
@@ -34,11 +35,19 @@ use crate::{
     velocity::VelocityEngine,
 };
 
+/// Sentinel string embedded in circuit-breaker errors so run() can distinguish
+/// them from transient per-block errors and propagate immediately.
+const CIRCUIT_BREAKER: &str = "CIRCUIT_BREAKER";
+
 /// Top-level engine struct.
 pub struct HuntLoanEngine {
     config:   Arc<Config>,
     executor: HuntLoanExecutor,
     velocity: Mutex<VelocityEngine>,
+    /// Counts consecutive execution reverts. Reset to 0 on any success.
+    consecutive_reverts: AtomicU32,
+    /// Counts consecutive RPC-level errors (scan or sim). Reset on any clean block.
+    rpc_error_streak:    AtomicU32,
 }
 
 impl HuntLoanEngine {
@@ -51,6 +60,8 @@ impl HuntLoanEngine {
             config,
             executor,
             velocity: Mutex::new(VelocityEngine::new()),
+            consecutive_reverts: AtomicU32::new(0),
+            rpc_error_streak:    AtomicU32::new(0),
         })
     }
 
@@ -120,11 +131,20 @@ impl HuntLoanEngine {
                 last_discovery_block = block_num;
             }
 
-            if let Err(e) = self
+            match self
                 .process_block(&ws_provider, block_num, base_fee, block_start, &reserve_cache)
                 .await
             {
-                error!(block = block_num, error = %e, "Block processing error");
+                Ok(()) => {}
+                Err(e) => {
+                    // Circuit-breaker errors must propagate to stop the engine.
+                    // All other per-block errors are logged and skipped.
+                    if e.to_string().contains(CIRCUIT_BREAKER) {
+                        error!("[CIRCUIT BREAKER] Engine stopping: {}", e);
+                        return Err(e);
+                    }
+                    error!(block = block_num, error = %e, "Block processing error");
+                }
             }
         }
 
@@ -147,7 +167,7 @@ impl HuntLoanEngine {
         // ── Stage 1: SCAN ────────────────────────────────────────────────────
         let scan_t = Instant::now();
         let candidates = crate::load_candidates(&self.config.watchlist_path)?;
-        let opportunities = scanner::scan(
+        let opportunities = match scanner::scan(
             provider.as_ref(),
             &self.config,
             &candidates,
@@ -155,7 +175,25 @@ impl HuntLoanEngine {
             base_fee_wei,
             reserve_cache,
         )
-        .await?;
+        .await
+        {
+            Ok(opps) => {
+                // Successful scan clears the RPC error streak
+                self.rpc_error_streak.store(0, Ordering::Relaxed);
+                opps
+            }
+            Err(e) => {
+                let streak = self.rpc_error_streak.fetch_add(1, Ordering::Relaxed) + 1;
+                warn!(block = block_num, streak = streak, error = %e, "Scan RPC error");
+                if streak >= self.config.max_rpc_errors {
+                    bail!(
+                        "{} — {} consecutive RPC errors (last: {})",
+                        CIRCUIT_BREAKER, streak, e
+                    );
+                }
+                return Ok(()); // non-fatal — skip this block
+            }
+        };
         let scan_ms = scan_t.elapsed().as_millis();
 
         if opportunities.is_empty() {
@@ -309,8 +347,10 @@ impl HuntLoanEngine {
             let exec_ms  = exec_t.elapsed().as_millis();
             let total_ms = block_start.elapsed().as_millis();
 
+            let mut any_confirmed = false;
             for (shot, result) in [("STRIKE", r1), ("KILL", r2)] {
                 if let Some(r) = result {
+                    any_confirmed = true;
                     info!(
                         shot     = shot,
                         tx_hash  = %r.tx_hash,
@@ -336,10 +376,22 @@ impl HuntLoanEngine {
                     });
                 }
             }
+            // Circuit breaker: parallel shots both returned None → treat as revert
+            if any_confirmed {
+                self.consecutive_reverts.store(0, Ordering::Relaxed);
+            } else {
+                let n = self.consecutive_reverts.fetch_add(1, Ordering::Relaxed) + 1;
+                warn!(count = n, "Parallel dual-shot: both shots returned no receipt");
+                if n >= self.config.max_consecutive_reverts {
+                    bail!("{} — {} consecutive execution failures", CIRCUIT_BREAKER, n);
+                }
+            }
         } else {
             // Standard single-shot execution
             match self.executor.execute(&best_opp, &best_sim, base_fee_wei).await {
                 Ok(result) => {
+                    // Successful confirm — reset revert counter
+                    self.consecutive_reverts.store(0, Ordering::Relaxed);
                     let exec_ms  = exec_t.elapsed().as_millis();
                     let total_ms = block_start.elapsed().as_millis();
                     info!(
@@ -366,8 +418,12 @@ impl HuntLoanEngine {
                     });
                 }
                 Err(e) => {
+                    // Circuit breaker — increment revert counter
+                    let n = self.consecutive_reverts.fetch_add(1, Ordering::Relaxed) + 1;
                     error!(
                         borrower = %best_opp.borrower,
+                        revert_count = n,
+                        max          = self.config.max_consecutive_reverts,
                         error    = %e,
                         "Execution failed"
                     );
@@ -379,6 +435,14 @@ impl HuntLoanEngine {
                         let msg = alerts::fmt_failed(&reason, &borrower, 1, 3, "retry queued");
                         let _ = alerts::send_telegram(msg, None, 0, false).await;
                     });
+
+                    // Trigger circuit breaker if threshold reached
+                    if n >= self.config.max_consecutive_reverts {
+                        bail!(
+                            "{} — {} consecutive execution reverts (last: {})",
+                            CIRCUIT_BREAKER, n, e
+                        );
+                    }
                 }
             }
         }

@@ -44,11 +44,14 @@ async fn main() -> Result<()> {
     // ── Config ───────────────────────────────────────────────────────────────
     let config = Config::from_env().wrap_err("Failed to load config from .env")?;
 
+    let mode = if config.dry_run { "DRY_RUN" }
+               else if config.soft_live { "SOFT_LIVE" }
+               else { "LIVE" };
     info!(
         rpc      = %config.rpc_http,
         ws       = ?config.rpc_ws.as_deref(),
         contract = %config.huntloan_addr,
-        dry_run  = config.dry_run,
+        mode     = mode,
         "Config loaded"
     );
 
@@ -70,7 +73,7 @@ async fn main() -> Result<()> {
              Mode        {}\n\
              Contract    {}\n\
              Chain       Base (8453)",
-            if config.dry_run { "DRY_RUN" } else { "LIVE" },
+            mode,
             config.huntloan_addr,
         );
         alerts::send_telegram_raw(token, chat_id, &msg).await;

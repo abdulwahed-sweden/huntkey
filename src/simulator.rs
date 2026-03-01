@@ -107,10 +107,14 @@ pub async fn simulate_on_chain<P: Provider>(
         .unwrap_or(800_000); // fallback to conservative estimate
 
     // ── 3. Profitability check with real gas estimate ────────────────────────
+    // Use the actual on-chain liquidation bonus resolved by the scanner via
+    // ReserveCache. Aave V3 Base bonuses range from 200bps (stablecoins)
+    // to 1000bps (volatile assets); using the real value prevents both
+    // false positives (overestimate) and false negatives (underestimate).
     let sim = math::simulate(
         opp.debt_to_repay,
         opp.collateral_usd,
-        500, // 5% liquidation bonus — TODO: fetch on-chain per-reserve
+        opp.liquidation_bonus_bps, // RISK-01 fixed: per-reserve bonus, not hardcoded 500
         base_fee_wei,
         eth_price_usd,
     );

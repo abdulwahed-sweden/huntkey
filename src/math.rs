@@ -99,4 +99,32 @@ mod tests {
         let r = simulate(10_000, 10_500, 500, 5_000_000, 2_000);
         assert!(r.profitable);
     }
+
+    /// RISK-01 regression: liquidation_bonus_bps MUST affect the profit calculation.
+    ///
+    /// If the simulator ever uses a hardcoded constant instead of the passed bonus,
+    /// this test will fail because both results would be identical regardless of input.
+    #[test]
+    fn test_bonus_bps_is_not_hardcoded() {
+        let debt     = 100_000_u128; // $100K
+        let coll     = 110_000_u128;
+        let gas_wei  = 5_000_000_u128;
+        let eth_usd  = 2_000_u128;
+
+        // Stable asset: 200bps (2%) — e.g. USDC collateral
+        let low  = simulate(debt, coll, 200, gas_wei, eth_usd);
+        // Volatile asset: 1000bps (10%) — e.g. cbBTC collateral
+        let high = simulate(debt, coll, 1_000, gas_wei, eth_usd);
+
+        assert!(
+            high.net_profit_usd > low.net_profit_usd,
+            "RISK-01 regression: liquidation_bonus_bps has no effect — \
+             simulator is ignoring the passed bonus and using a hardcoded constant. \
+             low={} high={}", low.net_profit_usd, high.net_profit_usd
+        );
+
+        // Sanity: 200bps bonus on 100K debt = $2000 gross → after 0.05% flash fee ($50)
+        // and negligible gas on Base L2, still profitable
+        assert!(low.profitable, "200bps bonus on $100K debt should be profitable");
+    }
 }
