@@ -2022,6 +2022,7 @@ dependencies = [
  "color-eyre",
  "dotenvy",
  "eyre",
+ "futures-util",
  "reqwest",
  "serde",
  "serde_json",

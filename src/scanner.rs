@@ -1,14 +1,26 @@
+/// HuntLoan scanner — identifies liquidatable positions on Aave V3 Base.
+///
+/// Pipeline position: [scanner] → simulator → executor
+///
+/// For each candidate address:
+///   1. Call IAavePool.getUserAccountData() via HTTP RPC
+///   2. Check health factor < 1.0 (fixed-point 18-dec)
+///   3. Filter by Goldilocks debt range ($5K–$500K)
+///   4. Pre-screen profitability via math::simulate
+///   5. Return sorted opportunities (highest profit first)
+///
+/// Full multicall3 batching and per-reserve delta-neutral check are TODO.
 use alloy::{
     primitives::Address,
-    providers::ProviderBuilder,
+    providers::Provider,
     sol,
 };
 use eyre::Result;
 use tracing::{info, warn};
 
-use crate::{config::Config, math};
+use crate::{config::Config, constants, math};
 
-/// Aave V3 Pool interface — only the calls we need
+/// Aave V3 Pool — getUserAccountData interface.
 sol! {
     #[allow(missing_docs)]
     #[sol(rpc)]
@@ -25,31 +37,31 @@ sol! {
     }
 }
 
-/// A liquidation opportunity ready to be executed
+/// A liquidation opportunity ready for simulation + execution.
 #[derive(Debug, Clone)]
 pub struct Opportunity {
-    pub borrower:              Address,
-    pub health_factor:         f64,
-    pub debt_usd:              u128,
-    pub collateral_usd:        u128,
-    pub collateral_asset:      Address,
-    pub debt_asset:            Address,
-    pub debt_to_repay:         u128,
-    pub estimated_profit_usd:  i128,
+    pub borrower:             Address,
+    pub health_factor:        f64,
+    pub debt_usd:             u128,
+    pub collateral_usd:       u128,
+    pub collateral_asset:     Address, // Address::ZERO until per-reserve scan
+    pub debt_asset:           Address, // Address::ZERO until per-reserve scan
+    pub debt_to_repay:        u128,    // 50% of total debt (Aave V3 cap)
+    pub estimated_profit_usd: i128,
 }
 
-/// Scan a list of borrower addresses, return those that are liquidatable
-/// and pass the profitability check.
-pub async fn find_opportunities(
+/// Scan a list of candidate borrowers and return profitable opportunities.
+///
+/// This function is called once per block by the HuntLoanEngine.
+/// All HTTP calls are made against the standard (non-wallet) provider.
+pub async fn scan<P: Provider>(
+    provider: &P,
     cfg: &Config,
     candidates: &[Address],
     eth_price_usd: u128,
-    gas_gwei: u128,
+    base_fee_wei: u128,
 ) -> Result<Vec<Opportunity>> {
-    let provider = ProviderBuilder::new()
-        .connect_http(cfg.rpc_http.parse()?);
-
-    let pool = IAavePool::new(crate::constants::AAVE_POOL, provider.clone());
+    let pool = IAavePool::new(cfg.aave_pool, provider);
 
     let mut opportunities = Vec::new();
 
@@ -57,33 +69,46 @@ pub async fn find_opportunities(
         let data = match pool.getUserAccountData(borrower).call().await {
             Ok(d) => d,
             Err(e) => {
-                warn!("getUserAccountData failed for {borrower}: {e}");
+                warn!(borrower = %borrower, "getUserAccountData failed: {e}");
                 continue;
             }
         };
 
-        // Health factor is in 18-decimal fixed point; < 1e18 = liquidatable
-        let hf_raw: u128 = data.healthFactor.try_into().unwrap_or(u128::MAX);
-        if hf_raw == 0 || hf_raw >= 1_000_000_000_000_000_000u128 {
-            continue; // not liquidatable
+        // Health factor is 18-decimal fixed-point; < 1e18 means liquidatable
+        let hf_raw: u128 = match data.healthFactor.try_into() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if hf_raw == 0 || hf_raw >= 1_000_000_000_000_000_000_u128 {
+            continue;
         }
 
         let hf: f64 = hf_raw as f64 / 1e18;
-        let debt_usd: u128 = data.totalDebtBase.try_into().unwrap_or(0) / 100; // 8-dec → 6-dec
-        let coll_usd: u128 = data.totalCollateralBase.try_into().unwrap_or(0) / 100;
+        // Aave base units are 8-decimal; convert to 6-decimal USD
+        let debt_usd: u128 = data.totalDebtBase.try_into().unwrap_or(0);
+        let coll_usd: u128 = data.totalCollateralBase.try_into().unwrap_or(0);
+        let debt_usd = debt_usd / 100;
+        let coll_usd = coll_usd / 100;
 
         if debt_usd == 0 || coll_usd == 0 {
             continue;
         }
 
-        // Aave allows liquidating up to 50% of debt in one call
+        // Goldilocks filter: $5K–$500K debt range
+        if debt_usd < constants::GOLDILOCKS_MIN_DEBT_USD as u128
+            || debt_usd > constants::GOLDILOCKS_MAX_DEBT_USD as u128
+        {
+            continue;
+        }
+
+        // Aave V3 allows liquidating up to 50% of debt per call
         let debt_to_repay = debt_usd / 2;
 
         let sim = math::simulate(
             debt_to_repay,
             coll_usd,
-            500, // assume 5% bonus — replace with on-chain reserve config
-            gas_gwei,
+            500, // 5% liquidation bonus — TODO: per-reserve on-chain lookup
+            base_fee_wei,
             eth_price_usd,
         );
 
@@ -97,25 +122,25 @@ pub async fn find_opportunities(
 
         info!(
             borrower = %borrower,
-            hf = hf,
+            hf       = hf,
             debt_usd = debt_usd,
-            net_profit = sim.net_profit_usd,
-            "Opportunity found"
+            profit   = sim.net_profit_usd,
+            "Opportunity identified"
         );
 
         opportunities.push(Opportunity {
             borrower,
-            health_factor: hf,
+            health_factor:        hf,
             debt_usd,
-            collateral_usd: coll_usd,
-            collateral_asset: Address::ZERO, // populated in full implementation
-            debt_asset:       Address::ZERO,
+            collateral_usd:       coll_usd,
+            collateral_asset:     Address::ZERO, // TODO: per-reserve breakdown
+            debt_asset:           Address::ZERO,
             debt_to_repay,
             estimated_profit_usd: sim.net_profit_usd,
         });
     }
 
-    // Sort by profit descending
+    // Sort by profit descending — execute highest-value opportunity first
     opportunities.sort_by(|a, b| b.estimated_profit_usd.cmp(&a.estimated_profit_usd));
     Ok(opportunities)
 }

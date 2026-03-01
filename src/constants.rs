@@ -1,4 +1,4 @@
-/// constants.rs — All Base mainnet addresses and protocol thresholds.
+/// HuntLoan constants — all Base mainnet addresses and protocol thresholds.
 ///
 /// Ported from: Bitcoin-Sentinel/eth_forensics/simulation/scripts/monitor_base.js (ADDRS block)
 /// and deployment_flash.json (contract addresses).
@@ -27,13 +27,13 @@ pub const USDC: Address = address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
 pub const MULTICALL3: Address = address!("cA11bde05977b3631167028862bE2a173976CA11");
 
 // ── Deployed contracts ─────────────────────────────────────────────────────
-/// Active flash liquidator V2 (zero-capital) — deployed 2026-02-28
-pub const FLASH_LIQUIDATOR_V2: Address =
+/// Legacy AbdulwahidFlashLiquidator V2 (fallback) — deployed 2026-02-28
+pub const LEGACY_FLASH_LIQUIDATOR: Address =
     address!("E5c3e80C243A6E21883E787013254BeAC829AD1E");
-/// Capital-funded fallback
-pub const BASE_ALPHA: Address = address!("F8B715bC559032316B56cE41E7fcF7F008a5E093");
-/// Owner / operator wallet
-pub const OWNER: Address = address!("3011BfD673a9D09f9761203A7fFCca757Af22587");
+/// Legacy capital-funded contract (fallback)
+pub const LEGACY_BASE_ALPHA: Address = address!("F8B715bC559032316B56cE41E7fcF7F008a5E093");
+/// Operator wallet
+pub const OPERATOR: Address = address!("3011BfD673a9D09f9761203A7fFCca757Af22587");
 
 // ── HF tier thresholds ─────────────────────────────────────────────────────
 /// Ported from CONFIG in monitor_base.js

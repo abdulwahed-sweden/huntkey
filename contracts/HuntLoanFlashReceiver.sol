@@ -9,27 +9,28 @@ import {SafeERC20}                    from "@openzeppelin/contracts/token/ERC20/
 import {Ownable}                      from "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
- * @title  Huntloan
- * @notice Flash-loan liquidation contract with 60/40 profit-sharing.
+ * @title  HuntLoanFlashReceiver
+ * @notice Aave V3 flash-loan liquidation contract for the HuntLoan execution engine.
+ *         Executes undercollateralised position liquidations on Base mainnet.
  *
  * Investment terms (immutable, set at deploy):
- *   - Capital: 10,000 USDC deposited by the Financier (Saeed).
- *   - Operator (Omar) executes liquidations using flash loans — zero capital risk.
+ *   - Capital deposited by the Financier.
+ *   - Operator executes liquidations using flash loans — zero capital risk per tx.
  *   - After the 6-month duration, profits are split:
  *       Financier: full capital recovery + 60% of net profit.
  *       Operator:  40% of net profit (0 if net profit is negative).
  *   - Gas fees for each liquidation call are paid by the operator wallet (off-chain).
  */
-contract Huntloan is FlashLoanSimpleReceiverBase, Ownable {
+contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable {
     using SafeERC20 for IERC20;
 
     // ── Investment parameters ────────────────────────────────────────────────
 
-    address public immutable financier; // Saeed — deposited 10,000 USDC
-    address public immutable operator;  // Omar  — executes liquidations
-    address public immutable usdc;      // USDC contract on Base
+    address public immutable financier;   // capital provider
+    address public immutable operator;    // execution bot wallet
+    address public immutable usdc;        // USDC contract on Base
 
-    uint256 public immutable capital;        // 10_000e6 (USDC 6-dec)
+    uint256 public immutable capital;        // initial capital in USDC (6-dec)
     uint256 public immutable maturityTime;   // deploy timestamp + 6 months
     bool    public           settled;        // true once profits distributed
 
@@ -52,14 +53,22 @@ contract Huntloan is FlashLoanSimpleReceiverBase, Ownable {
     );
     event ProfitDistributed(uint256 financierShare, uint256 operatorShare);
 
+    // ── Errors ───────────────────────────────────────────────────────────────
+
+    error OnlyOperator();
+    error ContractSettled();
+    error OnlyAavePool();
+    error LiquidationUnprofitable(uint256 received, uint256 owed);
+    error SwapNotImplemented();
+
     // ── Constructor ──────────────────────────────────────────────────────────
 
     constructor(
         address _provider,      // Aave V3 PoolAddressesProvider on Base
-        address _financier,     // Saeed's wallet
-        address _operator,      // Omar's wallet
+        address _financier,     // financier wallet
+        address _operator,      // operator wallet (execution bot)
         address _usdc,          // USDC on Base: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
-        uint256 _capitalAmount  // 10_000e6
+        uint256 _capitalAmount  // initial capital in USDC (6-dec), e.g. 10_000e6
     )
         FlashLoanSimpleReceiverBase(IPoolAddressesProvider(_provider))
         Ownable(_operator)
@@ -71,11 +80,15 @@ contract Huntloan is FlashLoanSimpleReceiverBase, Ownable {
         maturityTime  = block.timestamp + 180 days;
     }
 
-    // ── Main entry point — called by the Rust bot ────────────────────────────
+    // ── Main entry point — called by the HuntLoan Rust bot ──────────────────
 
     /**
-     * @notice Borrow `debtAmount` of `debtAsset` via Aave flash loan,
-     *         liquidate `borrower`, repay loan, keep the collateral profit.
+     * @notice Borrow `debtAmount` of `debtAsset` via Aave V3 flash loan,
+     *         liquidate `borrower`, repay loan + premium, keep collateral surplus.
+     * @param debtAsset       Token to borrow and repay (must match borrower's debt).
+     * @param debtAmount      Amount to borrow (up to 50% of borrower's debt).
+     * @param collateralAsset Collateral token to seize.
+     * @param borrower        Target underwater position.
      */
     function requestFlashLiquidation(
         address debtAsset,
@@ -83,10 +96,10 @@ contract Huntloan is FlashLoanSimpleReceiverBase, Ownable {
         address collateralAsset,
         address borrower
     ) external {
-        require(msg.sender == operator, "Only operator");
-        require(!settled, "Contract settled");
+        if (msg.sender != operator) revert OnlyOperator();
+        if (settled) revert ContractSettled();
 
-        // Store context for the callback
+        // Store context for the executeOperation callback
         _pendingDebtAsset        = debtAsset;
         _pendingCollateralAsset  = collateralAsset;
         _pendingBorrower         = borrower;
@@ -101,12 +114,12 @@ contract Huntloan is FlashLoanSimpleReceiverBase, Ownable {
         );
     }
 
-    // ── Aave callback ────────────────────────────────────────────────────────
+    // ── Aave V3 callback ─────────────────────────────────────────────────────
 
     /**
-     * @dev Called by Aave immediately after funds are transferred.
-     *      We liquidate the borrower, sell collateral, repay loan + fee.
-     *      Any surplus stays in the contract as profit.
+     * @dev Called by Aave immediately after flash loan funds are transferred.
+     *      Liquidates the borrower, swaps collateral to debt token, repays loan.
+     *      Any surplus above (amount + premium) stays in contract as profit.
      */
     function executeOperation(
         address asset,
@@ -115,34 +128,33 @@ contract Huntloan is FlashLoanSimpleReceiverBase, Ownable {
         address /*initiator*/,
         bytes calldata /*params*/
     ) external override returns (bool) {
-        require(msg.sender == address(POOL), "Only Aave pool");
+        if (msg.sender != address(POOL)) revert OnlyAavePool();
 
-        address borrower       = _pendingBorrower;
+        address borrower        = _pendingBorrower;
         address collateralAsset = _pendingCollateralAsset;
 
-        // 1. Approve Aave to pull back the debt token for liquidation
+        // 1. Approve Aave pool to pull debt token for liquidation call
         IERC20(asset).approve(address(POOL), amount);
 
-        // 2. Execute Aave liquidation — seize collateral
+        // 2. Execute Aave V3 liquidation — seize collateral at bonus
         uint256 collBefore = IERC20(collateralAsset).balanceOf(address(this));
         POOL.liquidationCall(collateralAsset, asset, borrower, amount, false);
         uint256 collSeized = IERC20(collateralAsset).balanceOf(address(this)) - collBefore;
 
-        // 3. Swap seized collateral → debtAsset (USDC) to repay flash loan
-        //    In production: call Uniswap V3 or Aerodrome here.
-        //    For the scaffold this is a placeholder — replace with live swap.
+        // 3. Swap seized collateral → debtAsset to repay the flash loan
+        //    Integrate Uniswap V3 SwapRouter or Aerodrome here (see TODO).
         uint256 received = _swapCollateralToDebt(collateralAsset, asset, collSeized);
 
-        // 4. Repay flash loan (amount + fee)
+        // 4. Verify profitability and repay flash loan (amount + Aave premium)
         uint256 owed = amount + premium;
-        require(received >= owed, "Liquidation not profitable");
+        if (received < owed) revert LiquidationUnprofitable(received, owed);
         IERC20(asset).approve(address(POOL), owed);
 
-        // 5. Track profit
+        // 5. Accumulate net profit
         uint256 profit = received - owed;
         totalProfit += profit;
 
-        // Clear context
+        // Clear per-call context
         _pendingDebtAsset        = address(0);
         _pendingCollateralAsset  = address(0);
         _pendingBorrower         = address(0);
@@ -154,21 +166,21 @@ contract Huntloan is FlashLoanSimpleReceiverBase, Ownable {
     // ── Profit distribution ──────────────────────────────────────────────────
 
     /**
-     * @notice Distribute profits after maturity.
-     *         Anyone can call this after 6 months to finalise the investment.
+     * @notice Distribute profits after the 6-month maturity period.
+     *         Anyone can trigger this to finalise the investment agreement.
+     *         Financier receives capital + 60% profit; operator receives 40% profit.
      */
     function settle() external {
-        require(block.timestamp >= maturityTime, "Not yet matured");
-        require(!settled, "Already settled");
+        require(block.timestamp >= maturityTime, "HuntLoan: not yet matured");
+        if (settled) revert ContractSettled();
         settled = true;
 
         uint256 balance = IERC20(usdc).balanceOf(address(this));
-
         uint256 financierShare;
         uint256 operatorShare;
 
         if (balance <= capital) {
-            // Loss: financier takes all remaining, operator gets nothing
+            // Loss scenario: financier recovers what remains, operator gets nothing
             financierShare = balance;
             operatorShare  = 0;
         } else {
@@ -183,25 +195,29 @@ contract Huntloan is FlashLoanSimpleReceiverBase, Ownable {
         emit ProfitDistributed(financierShare, operatorShare);
     }
 
-    // ── Emergency ────────────────────────────────────────────────────────────
+    // ── Emergency recovery ───────────────────────────────────────────────────
 
     /**
      * @notice Withdraw any ERC-20 token accidentally sent to this contract.
-     *         Only callable by operator (owner), and only before settlement.
+     *         Only callable by operator (owner), only before settlement.
      */
     function rescueToken(address token, uint256 amount) external onlyOwner {
-        require(!settled, "Already settled");
+        if (settled) revert ContractSettled();
         IERC20(token).safeTransfer(operator, amount);
     }
 
-    // ── Internal — swap stub (replace with live DEX call) ───────────────────
+    // ── Internal — DEX swap stub ─────────────────────────────────────────────
 
+    /**
+     * @dev Swap `amount` of `collateral` token into `debt` token.
+     *      TODO: Implement via Uniswap V3 SwapRouter (0x2626664c...) or
+     *            Aerodrome Router (0xcF77a3Ba...) on Base mainnet.
+     */
     function _swapCollateralToDebt(
         address /*collateral*/,
         address /*debt*/,
         uint256 /*amount*/
     ) internal pure returns (uint256) {
-        // TODO: integrate Uniswap V3 SwapRouter or Aerodrome on Base
-        revert("Swap not implemented — add DEX router call here");
+        revert SwapNotImplemented();
     }
 }

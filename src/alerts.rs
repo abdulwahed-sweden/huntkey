@@ -1,4 +1,4 @@
-/// alerts.rs — Telegram notification module.
+/// HuntLoan Telegram notification module.
 ///
 /// Ported from: Bitcoin-Sentinel/eth_forensics/simulation/scripts/telegram.js
 /// Format: clean structured text with HTML tags, no emoji.
@@ -249,4 +249,23 @@ pub fn fmt_aborted(label: &str, reason: &str) -> String {
          {}  <b>{trimmed}</b>",
         f("Reason"),
     )
+}
+
+// ── Raw send (explicit credentials) ─────────────────────────────────────────
+
+/// Send a pre-formatted message using explicit token + chat_id.
+/// Used at startup (before config is in scope) and for direct calls.
+/// Fails silently — never panics the main process.
+pub async fn send_telegram_raw(token: &str, chat_id: &str, text: &str) {
+    let client = Client::new();
+    let url    = format!("https://api.telegram.org/bot{token}/sendMessage");
+    let body   = serde_json::json!({
+        "chat_id":                  chat_id,
+        "text":                     &text[..text.len().min(4000)],
+        "parse_mode":               "HTML",
+        "disable_web_page_preview": true,
+    });
+    if let Err(e) = client.post(&url).json(&body).send().await {
+        warn!("Telegram boot alert failed: {e}");
+    }
 }

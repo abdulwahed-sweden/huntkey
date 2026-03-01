@@ -19,6 +19,7 @@ alloy = { version = "1", features = [
     "providers",
     "provider-http",
     "provider-ws",
+    "pubsub",          # subscribe_blocks() / subscribe_pending_transactions()
     "rpc-types",
     "signer-local",
     "sol-types",
@@ -26,6 +27,9 @@ alloy = { version = "1", features = [
     "transport-http",
     "transport-ws",
 ] }
+
+# Async stream combinators (StreamExt for WebSocket block subscription)
+futures-util = "0.3"
 
 # Error handling
 eyre = "0.6"

@@ -1,20 +1,28 @@
+/// HuntLoan execution engine — EIP-1559 tx construction, signing, nonce
+/// management, retry with fee-bumping, LIVE vs DRY_RUN modes.
+///
+/// Pipeline position: scanner → simulator → [executor] → contract
+use std::sync::Arc;
+use std::time::Instant;
+
 use alloy::{
     network::EthereumWallet,
-    primitives::{Address, U256},
-    providers::ProviderBuilder,
+    primitives::{Address, TxHash, U256},
+    providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
     sol,
 };
-use eyre::Result;
-use tracing::{error, info};
+use eyre::{bail, Result, WrapErr};
+use tokio::sync::Mutex;
+use tracing::{info, warn};
 
-use crate::{config::Config, scanner::Opportunity};
+use crate::{config::Config, gas, scanner::Opportunity, simulator::SimOutput};
 
-/// Huntloan contract interface (matches Huntloan.sol)
+// Solidity interface — matches HuntLoanFlashReceiver.sol
 sol! {
     #[allow(missing_docs)]
     #[sol(rpc)]
-    interface IHuntloan {
+    interface IHuntLoanReceiver {
         function requestFlashLiquidation(
             address debtAsset,
             uint256 debtAmount,
@@ -24,49 +32,224 @@ sol! {
     }
 }
 
-/// Execute a flash loan liquidation via Huntloan.sol
-pub async fn execute(cfg: &Config, opp: &Opportunity) -> Result<()> {
-    // Build a wallet-backed provider
-    let signer: PrivateKeySigner = cfg.operator_key.parse()?;
-    let wallet = EthereumWallet::from(signer);
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_http(cfg.rpc_http.parse()?);
+/// Outcome of a successful execution.
+#[derive(Debug, Clone)]
+pub struct ExecutionResult {
+    pub tx_hash:         TxHash,
+    pub block_number:    u64,
+    pub gas_used:        u64,
+    /// Wall-clock ms from execute() call to confirmed receipt.
+    pub send_latency_ms: u64,
+}
 
-    let contract = IHuntloan::new(cfg.huntloan_addr, provider.clone());
+/// Pre-calculated EIP-1559 fees for one tx attempt.
+#[derive(Debug, Clone)]
+struct TxFees {
+    max_fee_per_gas:  u128,
+    max_priority_fee: u128,
+    gas_limit:        u64,
+}
 
-    let debt_amount = U256::from(opp.debt_to_repay);
+/// HuntLoan transaction executor.
+///
+/// Create once at startup and reuse across all blocks.
+pub struct HuntLoanExecutor {
+    config:         Arc<Config>,
+    wallet:         EthereumWallet,
+    signer_address: Address,
+    /// Cached nonce — bumped optimistically; reset from chain on error.
+    nonce:          Mutex<Option<u64>>,
+}
 
-    info!(
-        borrower = %opp.borrower,
-        debt_amount = %debt_amount,
-        estimated_profit = opp.estimated_profit_usd,
-        "Firing flash loan liquidation"
-    );
-
-    // Simulate first (eth_call) — if this reverts we pay no gas
-    let call = contract.requestFlashLiquidation(
-        opp.debt_asset,
-        debt_amount,
-        opp.collateral_asset,
-        opp.borrower,
-    );
-
-    match call.call().await {
-        Err(e) => {
-            error!("Simulation reverted — aborting: {e}");
-            return Ok(()); // silent abort, no gas wasted
-        }
-        Ok(_) => info!("Simulation passed — broadcasting tx"),
+impl HuntLoanExecutor {
+    pub fn new(config: Arc<Config>) -> Result<Self> {
+        let signer: PrivateKeySigner = config
+            .operator_key
+            .parse()
+            .wrap_err("PRIVATE_KEY is not a valid hex key")?;
+        let signer_address = signer.address();
+        let wallet = EthereumWallet::from(signer);
+        Ok(Self {
+            config,
+            wallet,
+            signer_address,
+            nonce: Mutex::new(None),
+        })
     }
 
-    // Broadcast
-    let receipt = call.send().await?.get_receipt().await?;
-    info!(
-        tx_hash = %receipt.transaction_hash,
-        block  = receipt.block_number.unwrap_or(0),
-        "TX confirmed"
-    );
+    /// Execute a liquidation opportunity.
+    ///
+    /// DRY_RUN=true  → logs intent, no tx sent.
+    /// DRY_RUN=false → broadcasts with up to 3 retry attempts, bumping fees +15%
+    ///                 per retry using the same nonce.
+    pub async fn execute(
+        &self,
+        opp: &Opportunity,
+        sim: &SimOutput,
+        base_fee_wei: u128,
+    ) -> Result<ExecutionResult> {
+        let t = Instant::now();
+        let fees = self.compute_fees(opp.health_factor, base_fee_wei, sim.estimated_gas);
 
-    Ok(())
+        if self.config.dry_run {
+            info!(
+                mode = "DRY_RUN",
+                borrower = %opp.borrower,
+                debt_usd = opp.debt_usd,
+                estimated_profit = sim.net_profit_usd,
+                max_fee_gwei = fees.max_fee_per_gas / 1_000_000_000,
+                gas_limit = fees.gas_limit,
+                "DRY_RUN — tx NOT sent"
+            );
+            return Ok(ExecutionResult {
+                tx_hash:         TxHash::ZERO,
+                block_number:    0,
+                gas_used:        0,
+                send_latency_ms: t.elapsed().as_millis() as u64,
+            });
+        }
+
+        self.broadcast_with_retry(opp, &fees, t).await
+    }
+
+    // ── Broadcast + retry ────────────────────────────────────────────────────
+
+    async fn broadcast_with_retry(
+        &self,
+        opp: &Opportunity,
+        initial_fees: &TxFees,
+        t: Instant,
+    ) -> Result<ExecutionResult> {
+        const MAX_ATTEMPTS: u8 = 3;
+        const FEE_BUMP_PCT: u128 = 15; // +15% per retry
+
+        let provider = ProviderBuilder::new()
+            .wallet(self.wallet.clone())
+            .connect_http(
+                self.config.rpc_http.parse().wrap_err("RPC_URL invalid")?,
+            );
+
+        let nonce = self.acquire_nonce(&provider).await?;
+
+        for attempt in 0_u8..MAX_ATTEMPTS {
+            let bump = 100_u128 + FEE_BUMP_PCT * attempt as u128;
+            let fees = TxFees {
+                max_fee_per_gas:  initial_fees.max_fee_per_gas * bump / 100,
+                max_priority_fee: initial_fees.max_priority_fee * bump / 100,
+                gas_limit:        initial_fees.gas_limit,
+            };
+
+            info!(
+                attempt = attempt + 1,
+                borrower = %opp.borrower,
+                max_fee_gwei = fees.max_fee_per_gas / 1_000_000_000,
+                nonce = nonce,
+                "Broadcasting liquidation tx"
+            );
+
+            let contract = IHuntLoanReceiver::new(self.config.huntloan_addr, &provider);
+
+            let call = contract
+                .requestFlashLiquidation(
+                    opp.debt_asset,
+                    U256::from(opp.debt_to_repay),
+                    opp.collateral_asset,
+                    opp.borrower,
+                )
+                .max_fee_per_gas(fees.max_fee_per_gas)
+                .max_priority_fee_per_gas(fees.max_priority_fee)
+                .gas(fees.gas_limit)
+                .nonce(nonce);
+
+            match call.send().await {
+                Ok(pending) => {
+                    let tx_hash = *pending.tx_hash();
+                    info!(tx_hash = %tx_hash, "Tx submitted — waiting for receipt");
+
+                    match pending.get_receipt().await {
+                        Ok(receipt) => {
+                            let block_number = receipt.block_number.unwrap_or(0);
+                            let gas_used = receipt.gas_used as u64;
+                            let send_ms = t.elapsed().as_millis() as u64;
+                            self.confirm_nonce(nonce).await;
+                            info!(
+                                tx_hash = %tx_hash,
+                                block = block_number,
+                                gas_used = gas_used,
+                                send_latency_ms = send_ms,
+                                "Tx confirmed"
+                            );
+                            return Ok(ExecutionResult {
+                                tx_hash,
+                                block_number,
+                                gas_used,
+                                send_latency_ms: send_ms,
+                            });
+                        }
+                        Err(e) => {
+                            warn!(attempt = attempt + 1, error = %e, "Receipt wait failed");
+                        }
+                    }
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("revert") || msg.contains("execution reverted") {
+                        self.invalidate_nonce().await;
+                        bail!("Tx reverted: {}", msg);
+                    }
+                    warn!(attempt = attempt + 1, error = %msg, "Send error — retrying");
+                }
+            }
+        }
+
+        self.invalidate_nonce().await;
+        bail!("Execution failed after {} attempts", MAX_ATTEMPTS)
+    }
+
+    // ── EIP-1559 fee computation ──────────────────────────────────────────────
+
+    fn compute_fees(&self, health_factor: f64, base_fee_wei: u128, est_gas: u64) -> TxFees {
+        let tier = gas::select_tier(health_factor, 30.0);
+        let regime = gas::Regime::Stable; // TODO: detect_regime from price feed
+        let gas_tier = gas::compute_gas_tier(base_fee_wei, 1_000_000_000, tier, regime);
+
+        let gas_limit = if est_gas > 0 {
+            ((est_gas as u128 * 120 / 100).max(800_000)) as u64
+        } else {
+            800_000_u64
+        };
+
+        TxFees {
+            max_fee_per_gas:  gas_tier.max_fee_per_gas,
+            max_priority_fee: gas_tier.max_priority_fee,
+            gas_limit,
+        }
+    }
+
+    // ── Nonce management ─────────────────────────────────────────────────────
+
+    async fn acquire_nonce<P: Provider>(&self, provider: &P) -> Result<u64> {
+        let mut guard = self.nonce.lock().await;
+        if let Some(n) = *guard {
+            *guard = Some(n + 1);
+            return Ok(n);
+        }
+        let on_chain = provider
+            .get_transaction_count(self.signer_address)
+            .await
+            .wrap_err("get_transaction_count failed")?;
+        *guard = Some(on_chain + 1);
+        Ok(on_chain)
+    }
+
+    async fn confirm_nonce(&self, sent_nonce: u64) {
+        let mut guard = self.nonce.lock().await;
+        if guard.map_or(true, |n| sent_nonce + 1 > n) {
+            *guard = Some(sent_nonce + 1);
+        }
+    }
+
+    async fn invalidate_nonce(&self) {
+        *self.nonce.lock().await = None;
+    }
 }
