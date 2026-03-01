@@ -45,6 +45,28 @@ pub struct Config {
     /// Engine stops after this many consecutive RPC-level errors (scan/sim). Default: 10.
     pub max_rpc_errors: u32,          // MAX_RPC_ERRORS
 
+    // [ALERTS]
+    /// Minimum seconds between same-category Telegram alerts. Default: 60.
+    pub alert_rate_limit_secs: u64,   // ALERT_RATE_LIMIT_SECONDS
+    /// Seconds between hourly/daily summary alerts. Default: 3600.
+    pub summary_interval_secs: u64,   // SUMMARY_INTERVAL_SECONDS
+
+    // [EXECUTION FILTERS]
+    /// Only execute if HF <= this value (1.0 = execute all, 0.85 = strict). Default: 1.0.
+    pub strong_hf_threshold: f64,     // STRONG_HF_THRESHOLD
+    /// Minimum profit margin in basis points (profit/debt × 10000). Default: 50.
+    pub min_margin_bps: u64,          // MIN_MARGIN_BPS
+    /// Hard daily gas spend cap in wei (u128::MAX = disabled). Default: disabled.
+    pub max_daily_gas_wei: u128,      // MAX_DAILY_GAS_WEI
+    /// Hard daily bribe spend cap in wei (u128::MAX = disabled). Default: disabled.
+    pub max_daily_bribe_wei: u128,    // MAX_DAILY_BRIBE_WEI
+
+    // [SPEED]
+    /// Maximum concurrent on-chain simulation calls (JoinSet concurrency). Default: 4.
+    pub max_parallel_sims: usize,     // MAX_PARALLEL_SIMS
+    /// Seconds a failed target stays blacklisted before retry. Default: 300.
+    pub target_cooldown_secs: u64,    // TARGET_COOLDOWN_SECONDS
+
     // [CHAIN]
     pub chain_id: u64,                // 8453 (Base mainnet, hardcoded)
 }
@@ -126,6 +148,46 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(10_u32);
 
+        let alert_rate_limit_secs = std::env::var("ALERT_RATE_LIMIT_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60_u64);
+
+        let summary_interval_secs = std::env::var("SUMMARY_INTERVAL_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3600_u64);
+
+        let strong_hf_threshold = std::env::var("STRONG_HF_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.0_f64); // 1.0 = disabled (execute all < 1.0)
+
+        let min_margin_bps = std::env::var("MIN_MARGIN_BPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50_u64); // 50 bps = 0.5% minimum margin
+
+        let max_daily_gas_wei = std::env::var("MAX_DAILY_GAS_WEI")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(u128::MAX); // disabled by default
+
+        let max_daily_bribe_wei = std::env::var("MAX_DAILY_BRIBE_WEI")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(u128::MAX); // disabled by default
+
+        let max_parallel_sims = std::env::var("MAX_PARALLEL_SIMS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4_usize);
+
+        let target_cooldown_secs = std::env::var("TARGET_COOLDOWN_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300_u64);
+
         Ok(Self {
             rpc_http,
             rpc_ws,
@@ -144,6 +206,14 @@ impl Config {
             max_bribe_wei,
             max_consecutive_reverts,
             max_rpc_errors,
+            alert_rate_limit_secs,
+            summary_interval_secs,
+            strong_hf_threshold,
+            min_margin_bps,
+            max_daily_gas_wei,
+            max_daily_bribe_wei,
+            max_parallel_sims,
+            target_cooldown_secs,
             chain_id: 8453,
         })
     }

@@ -16,6 +16,7 @@ mod oracle;
 mod reserves;
 mod scanner;
 mod simulator;
+mod trades;
 mod velocity;
 
 use alloy::primitives::Address;
