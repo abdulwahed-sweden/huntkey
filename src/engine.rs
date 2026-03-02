@@ -249,11 +249,9 @@ impl HuntLoanEngine {
         let pnl_usd = s.net_profit_cents.load(Ordering::Relaxed) as f64 / 100.0;
         let top_rev = s.top_reverts(3);
 
-        let msg = alerts::fmt_summary(uptime, blocks, opps, sims_ok, tried, ok, gas_usd, pnl_usd, &top_rev);
-        let key = "cat_SUMMARY";
-        tokio::spawn(async move {
-            let _ = alerts::send_telegram(msg, Some(key), 0).await;
-        });
+        let msg      = alerts::fmt_summary(uptime, blocks, opps, sims_ok, tried, ok, gas_usd, pnl_usd, &top_rev);
+        let interval = self.config.summary_interval_secs;
+        let _ = alerts::send_telegram(msg, Some("cat_SUMMARY"), interval).await;
     }
 
     // ── Per-block pipeline ────────────────────────────────────────────────────
@@ -344,6 +342,20 @@ impl HuntLoanEngine {
             for wc in &warm   { ve.record(wc.borrower, wc.health_factor); }
             for opp in &opportunities { ve.record(opp.borrower, opp.health_factor); }
             ve.maybe_gc();
+        }
+
+        // ── [PHASE 1] Approaching alerts (ETA < 10 min) ──────────────────────
+        {
+            let ve = self.velocity.lock().await;
+            for wc in &warm {
+                if let Some(eta) = ve.eta_minutes(&wc.borrower) {
+                    if eta > 0.0 && eta < 10.0 {
+                        let addr = format!("{}", wc.borrower);
+                        let hf   = wc.health_factor;
+                        alerts::send_approaching(&addr, hf, eta, 0).await;
+                    }
+                }
+            }
         }
 
         // ── [PHASE 2] Apply blacklist filter ─────────────────────────────────
@@ -472,6 +484,17 @@ impl HuntLoanEngine {
             "Best opportunity selected"
         );
 
+        // [PHASE 1] OPPORTUNITY alert — target locked, about to execute
+        alerts::send_opportunity(
+            &format!("{}", best_opp.borrower),
+            best_opp.health_factor,
+            best_opp.debt_usd,
+            &format!("{}", best_opp.collateral_asset),
+            &format!("{}", best_opp.debt_asset),
+            best_sim.net_profit_usd,
+            score(&best_opp),
+        ).await;
+
         // ── Stage 3: EXECUTE ──────────────────────────────────────────────────
         let exec_t = Instant::now();
 
@@ -547,6 +570,7 @@ impl HuntLoanEngine {
             let total_ms = block_start.elapsed().as_millis();
 
             let mut any_confirmed = false;
+            let mut alert_sent    = false;
             for (shot, result) in [("STRIKE", r1), ("KILL", r2)] {
                 if let Some(r) = result {
                     any_confirmed = true;
@@ -577,26 +601,22 @@ impl HuntLoanEngine {
                         "Parallel shot confirmed"
                     );
 
-                    // [PHASE 1] EXECUTED alert
-                    let collateral = format!("{}", best_opp.collateral_asset);
-                    let debt_asset = format!("{}", best_opp.debt_asset);
-                    let borrower   = format!("{}", best_opp.borrower);
-                    let tx_hash_s  = format!("{}", r.tx_hash);
-                    let block_no   = r.block_number;
-                    let gas_u      = r.gas_used;
-                    let hf         = best_opp.health_factor;
-                    let debt_usd   = best_opp.debt_usd;
-                    let sim_net    = best_sim.net_profit_usd;
-                    let ep         = eth_price;
-                    let bf         = base_fee_wei;
-                    let alert_key  = format!("exec-{}", borrower);
-                    tokio::spawn(async move {
+                    // [PHASE 1] EXECUTED alert — only fire once (first confirmed shot)
+                    if !alert_sent {
+                        alert_sent = true;
+                        let collateral = format!("{}", best_opp.collateral_asset);
+                        let debt_asset = format!("{}", best_opp.debt_asset);
+                        let borrower   = format!("{}", best_opp.borrower);
+                        let tx_hash_s  = format!("{}", r.tx_hash);
+                        let alert_key  = format!("exec-{}", borrower);
                         let msg = alerts::fmt_executed(
-                            &borrower, hf, debt_usd, &collateral, &debt_asset,
-                            sim_net, gas_u, bf, ep, &tx_hash_s, block_no, 1,
+                            &borrower, best_opp.health_factor, best_opp.debt_usd,
+                            &collateral, &debt_asset,
+                            best_sim.net_profit_usd, r.gas_used, base_fee_wei,
+                            eth_price, &tx_hash_s, r.block_number, 1,
                         );
                         let _ = alerts::send_telegram(msg, Some(&alert_key), 0).await;
-                    });
+                    }
 
                     // [PHASE 5] Trade log
                     let ts = chrono_utc_now();
@@ -669,25 +689,20 @@ impl HuntLoanEngine {
                     );
 
                     // [PHASE 1] EXECUTED alert (confirmed, status=1)
-                    let collateral = format!("{}", best_opp.collateral_asset);
-                    let debt_asset = format!("{}", best_opp.debt_asset);
-                    let borrower   = format!("{}", best_opp.borrower);
-                    let tx_hash_s  = format!("{}", result.tx_hash);
-                    let block_no   = result.block_number;
-                    let gas_u      = result.gas_used;
-                    let hf         = best_opp.health_factor;
-                    let debt_usd   = best_opp.debt_usd;
-                    let sim_net    = best_sim.net_profit_usd;
-                    let ep         = eth_price;
-                    let bf         = base_fee_wei;
-                    let alert_key  = format!("exec-{}", borrower);
-                    tokio::spawn(async move {
+                    {
+                        let collateral = format!("{}", best_opp.collateral_asset);
+                        let debt_asset = format!("{}", best_opp.debt_asset);
+                        let borrower   = format!("{}", best_opp.borrower);
+                        let tx_hash_s  = format!("{}", result.tx_hash);
+                        let alert_key  = format!("exec-{}", borrower);
                         let msg = alerts::fmt_executed(
-                            &borrower, hf, debt_usd, &collateral, &debt_asset,
-                            sim_net, gas_u, bf, ep, &tx_hash_s, block_no, 1,
+                            &borrower, best_opp.health_factor, best_opp.debt_usd,
+                            &collateral, &debt_asset,
+                            best_sim.net_profit_usd, result.gas_used, base_fee_wei,
+                            eth_price, &tx_hash_s, result.block_number, 1,
                         );
                         let _ = alerts::send_telegram(msg, Some(&alert_key), 0).await;
-                    });
+                    }
 
                     // [PHASE 5] Trade log
                     let ts = chrono_utc_now();

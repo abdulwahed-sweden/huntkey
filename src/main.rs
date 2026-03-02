@@ -68,20 +68,13 @@ async fn main() -> Result<()> {
     }
 
     // ── Boot alert ───────────────────────────────────────────────────────────
-    if let (Some(token), Some(chat_id)) = (
-        config.telegram_token.as_deref(),
-        config.telegram_chat_id.as_deref(),
-    ) {
-        let msg = format!(
-            "<b>[ HUNTLOAN BOT — ONLINE ]</b>\n\
-             ─────────────────────────────────\n\
-             Mode        {}\n\
-             Contract    {}\n\
-             Chain       Base (8453)",
+    {
+        let msg = alerts::fmt_boot(
             mode,
-            config.huntloan_addr,
+            &format!("{}", config.huntloan_addr),
+            &format!("{}", config.operator_addr),
         );
-        alerts::send_telegram_raw(token, chat_id, &msg).await;
+        let _ = alerts::send_telegram(msg, Some("boot"), 0).await;
     }
 
     // ── Engine ───────────────────────────────────────────────────────────────

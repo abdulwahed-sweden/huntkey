@@ -1,11 +1,13 @@
 /// HuntLoan Telegram notification module — high-signal only.
 ///
-/// Exactly 4 alert classes are emitted:
+/// Alert classes:
 ///
-///   A) EXECUTED  — live tx confirmed on-chain (success or revert)
-///   B) FAILED    — execution attempt failed (send error / revert)
-///   C) CIRCUIT   — engine stopped by circuit breaker
-///   D) SUMMARY   — hourly/daily operational summary
+///   A) EXECUTED    — live tx confirmed on-chain (success or revert)
+///   B) FAILED      — execution attempt failed (send error / revert)
+///   C) CIRCUIT     — engine stopped by circuit breaker
+///   D) SUMMARY     — hourly/daily operational summary
+///   E) OPPORTUNITY — best candidate locked in, about to execute
+///   F) APPROACHING — warm-zone borrower ETA < 10 min
 ///
 /// NO per-block alerts. NO simulation pass/fail spam.
 /// Rate-limited per category, deduplicated per target, silent on missing creds.
@@ -285,6 +287,72 @@ pub fn fmt_summary(
          {f_toperr}  (see below)\n\
          {SEP}\n{revert_lines}"
     )
+}
+
+// ── CLASS E: BOOT ────────────────────────────────────────────────────────────
+
+/// Formatted boot message — call via send_telegram() after config is loaded.
+pub fn fmt_boot(mode: &str, contract: &str, operator: &str) -> String {
+    format!(
+        "🐺🚀 <b>HUNTLOAN — ONLINE</b>\n{SEP}\n\
+         {}  <b>{mode}</b>\n\
+         {}  <code>{}</code>\n\
+         {}  <code>{}</code>\n\
+         {}  Base (8453)",
+        f("Mode"),
+        f("Contract"), short_addr(contract),
+        f("Operator"), short_addr(operator),
+        f("Chain"),
+    )
+}
+
+// ── CLASS E: OPPORTUNITY ─────────────────────────────────────────────────────
+
+/// Fired just before execution — target locked, simulation passed.
+/// Throttled 30 s per borrower to avoid spam on fast blocks.
+pub async fn send_opportunity(
+    borrower:   &str,
+    hf:         f64,
+    debt_usd:   u128,
+    collateral: &str,
+    debt_asset: &str,
+    profit_usd: i128,
+    score_val:  f64,
+) {
+    let msg = format!(
+        "🎯 <b>TARGET LOCKED</b>\n{SEP}\n\
+         {}  <code>{}</code>\n\
+         {}  <b>{hf:.4}</b>\n\
+         {}  {collateral} → {debt_asset}\n\
+         {}  <b>{}</b>\n\
+         {}  <b>+{}</b>  est.\n\
+         {}  {score_val:.2}",
+        f("Borrower"), short_addr(borrower),
+        f("HF"),
+        f("Route"),
+        f("Debt"),   fmt_usd(debt_usd as f64),
+        f("Profit"), fmt_usd(profit_usd as f64),
+        f("Score"),
+    );
+    let key = format!("opp-{}", short_addr(borrower));
+    let _ = send_telegram(msg, Some(&key), 30).await;
+}
+
+// ── CLASS F: APPROACHING ─────────────────────────────────────────────────────
+
+/// Fired when a warm-zone borrower is < 10 min from HF = 1.0.
+/// Default throttle 120 s to avoid alert fatigue on slow declines.
+pub async fn send_approaching(borrower: &str, hf: f64, eta_min: f64, throttle_secs: u64) {
+    let msg = format!(
+        "⏳ <b>APPROACHING — ETA {eta_min:.1} min</b>\n{SEP}\n\
+         {}  <code>{}</code>\n\
+         {}  <b>{hf:.4}</b>",
+        f("Borrower"), short_addr(borrower),
+        f("HF"),
+    );
+    let key = format!("approach-{}", short_addr(borrower));
+    let ts  = if throttle_secs == 0 { 120 } else { throttle_secs };
+    let _ = send_telegram(msg, Some(&key), ts).await;
 }
 
 // ── Raw send (explicit credentials) ─────────────────────────────────────────
