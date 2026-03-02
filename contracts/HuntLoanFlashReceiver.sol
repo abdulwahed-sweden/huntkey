@@ -7,6 +7,7 @@ import {IPool}                        from "@aave/core-v3/contracts/interfaces/I
 import {IERC20}                       from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20}                    from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable}                      from "@openzeppelin/contracts/access/Ownable.sol";
+import {ReentrancyGuard}              from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 // ── DEX interfaces (inline — no extra package dependency) ───────────────────
 
@@ -63,7 +64,7 @@ interface IAerodromeRouter {
  *       Operator:  40% of net profit (0 if net profit is negative).
  *   - Gas fees for each liquidation call are paid by the operator wallet (off-chain).
  */
-contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable {
+contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ── DEX addresses (Base mainnet — immutable) ─────────────────────────────
@@ -145,7 +146,7 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable {
         uint256 debtAmount,
         address collateralAsset,
         address borrower
-    ) external {
+    ) external nonReentrant {
         if (msg.sender != operator) revert OnlyOperator();
         if (settled) revert ContractSettled();
 
@@ -176,12 +177,14 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable {
         address collateralAsset = _pendingCollateralAsset;
 
         // 1. Approve Aave pool to pull debt token for liquidation call
-        IERC20(asset).approve(address(POOL), amount);
+        // forceApprove resets to 0 before setting, avoiding non-zero allowance revert on USDT
+        IERC20(asset).forceApprove(address(POOL), amount);
 
         // 2. Execute Aave V3 liquidation — seize collateral at bonus
         uint256 collBefore = IERC20(collateralAsset).balanceOf(address(this));
         POOL.liquidationCall(collateralAsset, asset, borrower, amount, false);
         uint256 collSeized = IERC20(collateralAsset).balanceOf(address(this)) - collBefore;
+        require(collSeized > 0, "Liquidation yielded zero collateral");
 
         // 3. Amount owed to Aave: principal + 0.05% premium
         uint256 owed = amount + premium;
@@ -192,8 +195,8 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable {
         // 5. Safety check (swap already enforces minAmountOut = owed)
         if (received < owed) revert LiquidationUnprofitable(received, owed);
 
-        // 6. Approve Aave to pull repayment
-        IERC20(asset).approve(address(POOL), owed);
+        // 6. Approve Aave to pull repayment (forceApprove resets first)
+        IERC20(asset).forceApprove(address(POOL), owed);
 
         // 7. Accumulate net profit
         uint256 profit = received - owed;

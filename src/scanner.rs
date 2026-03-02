@@ -102,7 +102,7 @@ pub struct Opportunity {
 /// Scan candidates and return resolved, profitable, non-delta-neutral opportunities.
 ///
 /// The `reserve_cache` must be pre-loaded at engine startup (ReserveCache::load).
-pub async fn scan<P: Provider>(
+pub async fn scan<P: Provider + Clone + Send + Sync + 'static>(
     provider: &P,
     cfg: &Config,
     candidates: &[Address],
@@ -238,33 +238,6 @@ pub async fn scan_warm<P: Provider>(
 
 // ── Internal — Stage 1 batch ──────────────────────────────────────────────────
 
-/// Run one Multicall3 batch of getUserAccountData and return liquidatable entries.
-async fn hf_chunk<P: Provider>(
-    provider: &P,
-    cfg: &Config,
-    chunk: &[Address],
-) -> Result<Vec<(Address, f64, u128, u128)>> {
-    let raw = hf_batch_raw(provider, cfg, chunk).await?;
-    let mut out = Vec::new();
-    for (borrower, hf, debt_usd) in raw {
-        // Must be liquidatable
-        if hf >= 1.0 { continue; }
-
-        // Goldilocks filter: $5K – $500K
-        if debt_usd < constants::GOLDILOCKS_MIN_DEBT_USD as u128
-            || debt_usd > constants::GOLDILOCKS_MAX_DEBT_USD as u128
-        {
-            continue;
-        }
-
-        // Re-fetch coll_usd: stored in raw tuple would require change; compute here
-        // We approximate coll_usd from debt_usd × (1/hf) since getUserAccountData
-        // returns totalCollateralBase. We carry coll_usd through hf_batch_raw instead.
-        out.push((borrower, hf, debt_usd, 0_u128)); // coll_usd resolved in hf_batch_full
-    }
-    Ok(out)
-}
-
 /// Raw Multicall3 batch — returns (addr, hf, debt_usd) for every non-zero-debt
 /// address. No HF filtering applied; callers apply their own range logic.
 async fn hf_batch_raw<P: Provider>(
@@ -306,7 +279,9 @@ async fn hf_batch_raw<P: Provider>(
         if hf_raw == 0 { continue; }
 
         let hf: f64  = hf_raw as f64 / 1e18;
-        let debt_usd = data.totalDebtBase.try_into().unwrap_or(0_u128) / 100; // centi-dollars → whole USD
+        // Aave V3 BASE_CURRENCY_UNIT = 10^8 (confirmed on-chain via oracle.BASE_CURRENCY_UNIT()).
+        // totalDebtBase is denominated in 10^-8 USD, so dividing by 10^8 gives whole USD dollars.
+        let debt_usd = data.totalDebtBase.try_into().unwrap_or(0_u128) / 100_000_000; // 8-dec USD → whole USD $
 
         if debt_usd == 0 { continue; }
 
@@ -357,8 +332,9 @@ async fn hf_chunk_full<P: Provider>(
         }
 
         let hf: f64   = hf_raw as f64 / 1e18;
-        let debt_usd  = data.totalDebtBase.try_into().unwrap_or(0_u128) / 100; // centi-dollars → whole USD
-        let coll_usd  = data.totalCollateralBase.try_into().unwrap_or(0_u128) / 100; // centi-dollars → whole USD
+        // Aave V3 BASE_CURRENCY_UNIT = 10^8: divide by 10^8 to get whole USD dollars.
+        let debt_usd  = data.totalDebtBase.try_into().unwrap_or(0_u128) / 100_000_000;
+        let coll_usd  = data.totalCollateralBase.try_into().unwrap_or(0_u128) / 100_000_000;
 
         if debt_usd == 0 || coll_usd == 0 { continue; }
 

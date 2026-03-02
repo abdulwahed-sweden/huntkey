@@ -16,6 +16,7 @@
 ///
 /// The reserve list is fetched once at engine startup and cached.
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use alloy::{
     primitives::{address, Address, Bytes},
@@ -24,6 +25,7 @@ use alloy::{
     sol_types::SolCall,
 };
 use eyre::Result;
+use tokio::task::JoinSet;
 use tracing::{info, warn};
 
 use crate::constants::{self, MULTICALL3};
@@ -197,30 +199,38 @@ pub struct ResolvedPosition {
 
 /// Batch-resolve the best (collateral, debt) pair for a set of borrowers.
 ///
-/// For each borrower: batches getUserReserveData for ALL reserves in one
-/// Multicall3 call. Picks highest aToken balance as collateral, highest
-/// variable debt as debt asset.
+/// Runs all borrowers in parallel via JoinSet (one RPC call per borrower).
+/// Picks highest aToken balance as collateral, highest variable debt as debt asset.
 ///
 /// Returns a map: borrower → ResolvedPosition.
 /// Missing entries = position could not be resolved (skip execution).
-pub async fn resolve_positions<P: Provider>(
+pub async fn resolve_positions<P: Provider + Clone + Send + Sync + 'static>(
     provider: &P,
     cache: &ReserveCache,
     borrowers: &[Address],
 ) -> HashMap<Address, ResolvedPosition> {
-    let mut out = HashMap::new();
+    let provider = Arc::new(provider.clone());
+    let cache    = Arc::new(cache.clone());
+
+    let mut join_set: JoinSet<(Address, Option<ResolvedPosition>)> = JoinSet::new();
 
     for &borrower in borrowers {
-        match resolve_single(provider, cache, borrower).await {
-            Some(pos) => {
-                out.insert(borrower, pos);
-            }
-            None => {
-                warn!(borrower = %borrower, "[reserves] Could not resolve position");
-            }
-        }
+        let prov  = provider.clone();
+        let cache = cache.clone();
+        join_set.spawn(async move {
+            let pos = resolve_single(&*prov, &*cache, borrower).await;
+            (borrower, pos)
+        });
     }
 
+    let mut out = HashMap::new();
+    while let Some(task_result) = join_set.join_next().await {
+        match task_result {
+            Ok((borrower, Some(pos))) => { out.insert(borrower, pos); }
+            Ok((borrower, None))      => { warn!(borrower = %borrower, "[reserves] Could not resolve position"); }
+            Err(e)                    => { warn!("[reserves] resolve task join error: {e}"); }
+        }
+    }
     out
 }
 

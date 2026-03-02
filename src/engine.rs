@@ -71,6 +71,9 @@ fn score(opp: &Opportunity) -> f64 {
 struct DailyBudget {
     gas_wei:   u128,
     bribe_wei: u128,
+    /// Days since Common Era (from chrono::NaiveDate::num_days_from_ce).
+    /// Reset triggers when current day differs from this value.
+    reset_day: i32,
 }
 
 // ── Top-level engine struct ───────────────────────────────────────────────────
@@ -88,8 +91,12 @@ pub struct HuntLoanEngine {
     // [PHASE 2] Execution filters
     /// Target cooldown blacklist: address → time it was blacklisted.
     blacklist: Mutex<HashMap<Address, Instant>>,
-    /// Daily running totals (reset: on bot restart only; upgrade: add midnight timer).
+    /// Daily running totals (midnight-reset via chrono).
     daily:     Mutex<DailyBudget>,
+    /// ETH price snapshot for 5-min regime detection: (price_usd, snapshot_time).
+    last_eth_price: Mutex<(u128, Instant)>,
+    /// Watchlist candidates cached in memory — refreshed by background discovery task.
+    candidates: Arc<Mutex<Vec<Address>>>,
 }
 
 impl HuntLoanEngine {
@@ -103,8 +110,10 @@ impl HuntLoanEngine {
             velocity: Mutex::new(VelocityEngine::new()),
             consecutive_reverts: AtomicU64::new(0),
             rpc_error_streak:    AtomicU64::new(0),
-            blacklist: Mutex::new(HashMap::new()),
-            daily: Mutex::new(DailyBudget { gas_wei: 0, bribe_wei: 0 }),
+            blacklist:      Mutex::new(HashMap::new()),
+            daily:          Mutex::new(DailyBudget { gas_wei: 0, bribe_wei: 0, reset_day: 0 }),
+            last_eth_price: Mutex::new((0, Instant::now())),
+            candidates:     Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -145,9 +154,16 @@ impl HuntLoanEngine {
             self.config.dry_run, self.config.soft_live, self.config.max_parallel_sims
         );
 
-        // Initial watchlist refresh
+        // Initial watchlist refresh + candidate cache load
         if let Err(e) = discovery::refresh_watchlist(&self.config.watchlist_path).await {
             warn!("[HuntLoanEngine] Initial watchlist refresh failed: {}", e);
+        }
+        match crate::load_candidates(&self.config.watchlist_path) {
+            Ok(v) => {
+                info!("[HuntLoanEngine] Loaded {} initial candidates", v.len());
+                *self.candidates.lock().await = v;
+            }
+            Err(e) => warn!("[HuntLoanEngine] Initial candidate load failed: {}", e),
         }
 
         let mut last_discovery_block: u64 = 0;
@@ -167,12 +183,22 @@ impl HuntLoanEngine {
             // Record block in session stats
             alerts::get_stats().blocks_processed.fetch_add(1, Ordering::Relaxed);
 
-            // Periodic subgraph discovery (background)
+            // Periodic subgraph discovery (background) — refreshes file and updates candidate cache
             if block_num.saturating_sub(last_discovery_block) >= DISCOVERY_INTERVAL_BLOCKS {
-                let path = self.config.watchlist_path.clone();
+                let path           = self.config.watchlist_path.clone();
+                let candidates_arc = self.candidates.clone();
                 tokio::spawn(async move {
                     if let Err(e) = discovery::refresh_watchlist(&path).await {
                         warn!("[discovery] Background refresh failed: {}", e);
+                    } else {
+                        match crate::load_candidates(&path) {
+                            Ok(v) => {
+                                let n = v.len();
+                                *candidates_arc.lock().await = v;
+                                info!("[discovery] Candidate cache updated: {} addresses", n);
+                            }
+                            Err(e) => warn!("[discovery] Failed to reload candidates: {}", e),
+                        }
                     }
                 });
                 last_discovery_block = block_num;
@@ -242,9 +268,32 @@ impl HuntLoanEngine {
     ) -> Result<()> {
         let eth_price = oracle::fetch_eth_price_usd(provider.as_ref()).await;
 
+        // ── Regime detection (5-min ETH price window) ─────────────────────────
+        let regime = {
+            let mut price_guard = self.last_eth_price.lock().await;
+            let (snap_price, snap_time) = *price_guard;
+            let r = if snap_price > 0 && eth_price > 0 {
+                let pct = (eth_price as f64 - snap_price as f64) / snap_price as f64;
+                gas::detect_regime(pct)
+            } else {
+                gas::Regime::Stable
+            };
+            // Refresh snapshot every ~5 minutes (skip on oracle failure)
+            if eth_price > 0 && (snap_price == 0 || snap_time.elapsed() >= Duration::from_secs(300)) {
+                *price_guard = (eth_price, Instant::now());
+            }
+            r
+        };
+
         // ── Stage 1: SCAN ─────────────────────────────────────────────────────
-        let scan_t = Instant::now();
-        let candidates = crate::load_candidates(&self.config.watchlist_path)?;
+        let scan_t   = Instant::now();
+        let candidates = {
+            let guard = self.candidates.lock().await;
+            guard.clone()
+        };
+        if candidates.is_empty() {
+            return Ok(());
+        }
         let mut opportunities = match scanner::scan(
             provider.as_ref(),
             &self.config,
@@ -428,7 +477,7 @@ impl HuntLoanEngine {
 
         // Gas tier + bribe
         let gas_tier_sel = gas::select_tier(best_opp.health_factor, 30.0);
-        let gas_tier     = gas::compute_gas_tier(base_fee_wei, 1_000_000_000, gas_tier_sel, gas::Regime::Stable);
+        let gas_tier     = gas::compute_gas_tier(base_fee_wei, 1_000_000_000, gas_tier_sel, regime);
         let gross_profit_wei: u128 = if eth_price > 0 {
             (best_sim.net_profit_usd as f64 / eth_price as f64 * 1e18) as u128
         } else { 0 };
@@ -439,6 +488,20 @@ impl HuntLoanEngine {
         {
             let est_gas_cost = (best_sim.estimated_gas as u128).saturating_mul(base_fee_wei);
             let mut daily = self.daily.lock().await;
+
+            // Midnight reset — compare current UTC day against stored day
+            let today = current_utc_day();
+            if daily.reset_day != today {
+                info!(
+                    old_gas_wei   = daily.gas_wei,
+                    old_bribe_wei = daily.bribe_wei,
+                    new_day       = today,
+                    "Daily budget reset at midnight"
+                );
+                daily.gas_wei   = 0;
+                daily.bribe_wei = 0;
+                daily.reset_day = today;
+            }
 
             if self.config.max_daily_gas_wei < u128::MAX {
                 let projected = daily.gas_wei.saturating_add(est_gas_cost);
@@ -477,7 +540,7 @@ impl HuntLoanEngine {
         if best_sim.net_profit_usd >= PARALLEL_CONVICTION_USD as i128 {
             // High-conviction: dual-shot (STRIKE + KILL) in parallel
             let (r1, r2) = self.executor
-                .execute_parallel(&best_opp, &best_sim, base_fee_wei)
+                .execute_parallel(&best_opp, &best_sim, base_fee_wei, regime)
                 .await;
 
             let exec_ms  = exec_t.elapsed().as_millis();
@@ -573,7 +636,7 @@ impl HuntLoanEngine {
             }
         } else {
             // Standard single-shot
-            match self.executor.execute(&best_opp, &best_sim, base_fee_wei).await {
+            match self.executor.execute(&best_opp, &best_sim, base_fee_wei, regime).await {
                 Ok(result) => {
                     self.consecutive_reverts.store(0, Ordering::Relaxed);
 
@@ -706,36 +769,14 @@ impl HuntLoanEngine {
     }
 }
 
-/// Returns current UTC time as ISO-8601 string without chrono dependency.
+/// Returns current UTC time as RFC-3339 string (e.g. "2026-03-02T15:30:00Z").
 fn chrono_utc_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    // Format as YYYY-MM-DDTHH:MM:SSZ from unix timestamp
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
-    let days = secs / 86400;
-    // Simple Gregorian approximation (accurate to ±1 day for our purposes)
-    let year = 1970 + days / 365;
-    let doy  = days % 365;
-    let (mon, dom) = day_of_year_to_md(doy, year);
-    format!("{year:04}-{mon:02}-{dom:02}T{h:02}:{m:02}:{s:02}Z")
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-fn day_of_year_to_md(doy: u64, year: u64) -> (u64, u64) {
-    let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    let months: &[u64] = if is_leap {
-        &[31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        &[31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut rem = doy;
-    for (i, &days) in months.iter().enumerate() {
-        if rem < days { return (i as u64 + 1, rem + 1); }
-        rem -= days;
-    }
-    (12, rem + 1)
+/// Returns current UTC date as days since the Common Era.
+/// Monotonically increasing — used only for == comparisons between calls.
+fn current_utc_day() -> i32 {
+    use chrono::Datelike;
+    chrono::Utc::now().date_naive().num_days_from_ce()
 }

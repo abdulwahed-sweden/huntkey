@@ -94,6 +94,7 @@ impl HuntLoanExecutor {
         opp: &Opportunity,
         sim: &SimOutput,
         base_fee_wei: u128,
+        regime: gas::Regime,
     ) -> (Option<ExecutionResult>, Option<ExecutionResult>) {
         let t = Instant::now();
 
@@ -102,8 +103,8 @@ impl HuntLoanExecutor {
         } else {
             800_000_u64
         };
-        let gt_s = gas::compute_gas_tier(base_fee_wei, 1_000_000_000, gas::Tier::Strike, gas::Regime::Stable);
-        let gt_k = gas::compute_gas_tier(base_fee_wei, 1_000_000_000, gas::Tier::Kill,   gas::Regime::Stable);
+        let gt_s = gas::compute_gas_tier(base_fee_wei, 1_000_000_000, gas::Tier::Strike, regime);
+        let gt_k = gas::compute_gas_tier(base_fee_wei, 1_000_000_000, gas::Tier::Kill,   regime);
 
         if self.config.dry_run {
             info!(
@@ -239,6 +240,13 @@ impl HuntLoanExecutor {
             }
         );
 
+        // If both shots failed to confirm, invalidate the nonce cache.
+        // Without this, the next execution attempt would start at N+2 (stale)
+        // instead of re-fetching the correct pending nonce from the chain.
+        if r1.is_none() && r2.is_none() {
+            self.invalidate_nonce().await;
+        }
+
         (r1, r2)
     }
 
@@ -252,9 +260,10 @@ impl HuntLoanExecutor {
         opp: &Opportunity,
         sim: &SimOutput,
         base_fee_wei: u128,
+        regime: gas::Regime,
     ) -> Result<ExecutionResult> {
         let t = Instant::now();
-        let fees = self.compute_fees(opp.health_factor, base_fee_wei, sim.estimated_gas);
+        let fees = self.compute_fees(opp.health_factor, base_fee_wei, sim.estimated_gas, regime);
 
         if self.config.dry_run {
             info!(
@@ -439,9 +448,8 @@ impl HuntLoanExecutor {
 
     // ── EIP-1559 fee computation ──────────────────────────────────────────────
 
-    fn compute_fees(&self, health_factor: f64, base_fee_wei: u128, est_gas: u64) -> TxFees {
-        let tier = gas::select_tier(health_factor, 30.0);
-        let regime = gas::Regime::Stable; // TODO: detect_regime from price feed
+    fn compute_fees(&self, health_factor: f64, base_fee_wei: u128, est_gas: u64, regime: gas::Regime) -> TxFees {
+        let tier     = gas::select_tier(health_factor, 30.0);
         let gas_tier = gas::compute_gas_tier(base_fee_wei, 1_000_000_000, tier, regime);
 
         let gas_limit = if est_gas > 0 {
