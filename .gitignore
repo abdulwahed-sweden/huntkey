@@ -30,3 +30,7 @@ logs/
 *.swp
 *.swo
 *~
+
+# ── Deployment artifacts ────────────────────────────────────────────────────
+ecosystem.config.js
+watchlist.json

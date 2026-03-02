@@ -87,7 +87,6 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable, Reentran
 
     // ── Flash loan execution context (set per-call, cleared after) ──────────
 
-    address private _pendingDebtAsset;
     address private _pendingCollateralAsset;
     address private _pendingBorrower;
 
@@ -102,6 +101,7 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable, Reentran
     );
     event ProfitDistributed(uint256 financierShare, uint256 operatorShare);
     event SwapRouteUsed(address tokenIn, address tokenOut, string route, uint256 amountOut);
+    event Swept(address token, uint256 amountIn, uint256 usdcReceived);
 
     // ── Errors ───────────────────────────────────────────────────────────────
 
@@ -109,7 +109,6 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable, Reentran
     error ContractSettled();
     error OnlyAavePool();
     error LiquidationUnprofitable(uint256 received, uint256 owed);
-    /// Raised when all swap routes (Uniswap V3 + Aerodrome) fail or return < minAmountOut.
     error SwapFailed(address tokenIn, address tokenOut, uint256 amountIn, uint256 minOut);
 
     // ── Constructor ──────────────────────────────────────────────────────────
@@ -133,14 +132,6 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable, Reentran
 
     // ── Main entry point — called by the HuntLoan Rust bot ──────────────────
 
-    /**
-     * @notice Borrow `debtAmount` of `debtAsset` via Aave V3 flash loan,
-     *         liquidate `borrower`, repay loan + premium, keep collateral surplus.
-     * @param debtAsset       Token to borrow and repay (must match borrower's debt).
-     * @param debtAmount      Amount to borrow (up to 50% of borrower's debt).
-     * @param collateralAsset Collateral token to seize.
-     * @param borrower        Target underwater position.
-     */
     function requestFlashLiquidation(
         address debtAsset,
         uint256 debtAmount,
@@ -150,7 +141,6 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable, Reentran
         if (msg.sender != operator) revert OnlyOperator();
         if (settled) revert ContractSettled();
 
-        _pendingDebtAsset        = debtAsset;
         _pendingCollateralAsset  = collateralAsset;
         _pendingBorrower         = borrower;
 
@@ -159,11 +149,6 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable, Reentran
 
     // ── Aave V3 callback ─────────────────────────────────────────────────────
 
-    /**
-     * @dev Called by Aave immediately after flash loan funds are transferred.
-     *      Liquidates the borrower, routes collateral swap, repays loan.
-     *      Any surplus above (amount + premium) stays in contract as profit.
-     */
     function executeOperation(
         address asset,
         uint256 amount,
@@ -177,7 +162,6 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable, Reentran
         address collateralAsset = _pendingCollateralAsset;
 
         // 1. Approve Aave pool to pull debt token for liquidation call
-        // forceApprove resets to 0 before setting, avoiding non-zero allowance revert on USDT
         IERC20(asset).forceApprove(address(POOL), amount);
 
         // 2. Execute Aave V3 liquidation — seize collateral at bonus
@@ -189,21 +173,23 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable, Reentran
         // 3. Amount owed to Aave: principal + 0.05% premium
         uint256 owed = amount + premium;
 
-        // 4. Swap collateral → debt token; must return at least `owed`
+        // 4. Swap collateral -> debt token; must return at least `owed`
         uint256 received = _swapCollateralToDebt(collateralAsset, asset, collSeized, owed);
 
-        // 5. Safety check (swap already enforces minAmountOut = owed)
+        // 5. Safety check
         if (received < owed) revert LiquidationUnprofitable(received, owed);
 
-        // 6. Approve Aave to pull repayment (forceApprove resets first)
+        // 6. Approve Aave to pull repayment
         IERC20(asset).forceApprove(address(POOL), owed);
 
-        // 7. Accumulate net profit
+        // 7. Track profit only for USDC-denominated debt
         uint256 profit = received - owed;
-        totalProfit += profit;
+        if (asset == usdc) {
+            totalProfit += profit;
+        }
+        // Non-USDC profit stays in contract — swept later via sweepToUsdc()
 
         // Clear per-call context
-        _pendingDebtAsset        = address(0);
         _pendingCollateralAsset  = address(0);
         _pendingBorrower         = address(0);
 
@@ -211,12 +197,25 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable, Reentran
         return true;
     }
 
+    // ── Sweep non-USDC profit to USDC ────────────────────────────────────────
+
+    function sweepToUsdc(address token, uint256 amount) external {
+        if (msg.sender != operator) revert OnlyOperator();
+        if (token == usdc) revert("Already USDC");
+        if (settled) revert ContractSettled();
+
+        uint256 usdcBefore = IERC20(usdc).balanceOf(address(this));
+        _swapCollateralToDebt(token, usdc, amount, 0);
+        uint256 usdcAfter = IERC20(usdc).balanceOf(address(this));
+
+        uint256 usdcReceived = usdcAfter - usdcBefore;
+        totalProfit += usdcReceived;
+
+        emit Swept(token, amount, usdcReceived);
+    }
+
     // ── Profit distribution ──────────────────────────────────────────────────
 
-    /**
-     * @notice Distribute profits after the 6-month maturity period.
-     *         Anyone can trigger to finalise the investment agreement.
-     */
     function settle() external {
         require(block.timestamp >= maturityTime, "HuntLoan: not yet matured");
         if (settled) revert ContractSettled();
@@ -250,25 +249,6 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable, Reentran
 
     // ── Internal — DEX swap with route fallback ──────────────────────────────
 
-    /**
-     * @dev Swap `amountIn` of `collateral` → `debt`.
-     *
-     *      Route priority:
-     *        1. Uniswap V3 fee=500   (stablecoin / tight pairs)
-     *        2. Uniswap V3 fee=3000  (most ETH-paired assets)
-     *        3. Uniswap V3 fee=10000 (long-tail assets)
-     *        4. Aerodrome volatile pool
-     *        5. Aerodrome stable pool
-     *
-     *      The first route that returns >= minAmountOut is used.
-     *      Reverts SwapFailed if no route succeeds.
-     *
-     * @param collateral   Token received from Aave liquidation.
-     * @param debt         Token to return to repay the flash loan.
-     * @param amountIn     Amount of collateral to swap.
-     * @param minAmountOut Minimum acceptable output (= flash loan owed amount).
-     * @return amountOut   Actual tokens received after swap.
-     */
     function _swapCollateralToDebt(
         address collateral,
         address debt,
@@ -277,7 +257,7 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable, Reentran
     ) internal returns (uint256 amountOut) {
 
         // ── Route 1-3: Uniswap V3 ────────────────────────────────────────────
-        IERC20(collateral).approve(UNISWAP_ROUTER, amountIn);
+        IERC20(collateral).forceApprove(UNISWAP_ROUTER, amountIn);
 
         uint24[3] memory feeTiers = [uint24(500), uint24(3000), uint24(10000)];
         for (uint256 i = 0; i < 3; i++) {
@@ -292,16 +272,15 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable, Reentran
                     sqrtPriceLimitX96: 0
                 })
             ) returns (uint256 out) {
-                // Success — reset approval and return
-                IERC20(collateral).approve(UNISWAP_ROUTER, 0);
+                IERC20(collateral).forceApprove(UNISWAP_ROUTER, 0);
                 emit SwapRouteUsed(collateral, debt, _feeLabel(feeTiers[i]), out);
                 return out;
             } catch { /* try next tier */ }
         }
-        IERC20(collateral).approve(UNISWAP_ROUTER, 0); // reset if all tiers failed
+        IERC20(collateral).forceApprove(UNISWAP_ROUTER, 0);
 
         // ── Routes 4-5: Aerodrome (volatile then stable) ─────────────────────
-        IERC20(collateral).approve(AERODROME_ROUTER, amountIn);
+        IERC20(collateral).forceApprove(AERODROME_ROUTER, amountIn);
 
         IAerodromeRouter.Route[] memory routes = new IAerodromeRouter.Route[](1);
         routes[0] = IAerodromeRouter.Route({
@@ -316,7 +295,7 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable, Reentran
             amountIn, minAmountOut, routes, address(this), block.timestamp + 120
         ) returns (uint256[] memory amounts) {
             if (amounts.length > 0 && amounts[amounts.length - 1] >= minAmountOut) {
-                IERC20(collateral).approve(AERODROME_ROUTER, 0);
+                IERC20(collateral).forceApprove(AERODROME_ROUTER, 0);
                 emit SwapRouteUsed(collateral, debt, "AERODROME_VOLATILE", amounts[amounts.length - 1]);
                 return amounts[amounts.length - 1];
             }
@@ -328,17 +307,16 @@ contract HuntLoanFlashReceiver is FlashLoanSimpleReceiverBase, Ownable, Reentran
             amountIn, minAmountOut, routes, address(this), block.timestamp + 120
         ) returns (uint256[] memory amounts) {
             if (amounts.length > 0 && amounts[amounts.length - 1] >= minAmountOut) {
-                IERC20(collateral).approve(AERODROME_ROUTER, 0);
+                IERC20(collateral).forceApprove(AERODROME_ROUTER, 0);
                 emit SwapRouteUsed(collateral, debt, "AERODROME_STABLE", amounts[amounts.length - 1]);
                 return amounts[amounts.length - 1];
             }
         } catch { /* all routes failed */ }
 
-        IERC20(collateral).approve(AERODROME_ROUTER, 0);
+        IERC20(collateral).forceApprove(AERODROME_ROUTER, 0);
         revert SwapFailed(collateral, debt, amountIn, minAmountOut);
     }
 
-    /// @dev Human-readable label for Uniswap fee tier (for event logging).
     function _feeLabel(uint24 fee) private pure returns (string memory) {
         if (fee == 500)   return "UNISWAP_V3_0.05%";
         if (fee == 3000)  return "UNISWAP_V3_0.3%";
