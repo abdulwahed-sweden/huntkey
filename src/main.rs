@@ -31,6 +31,9 @@ use crate::{config::Config, engine::HuntLoanEngine};
 #[tokio::main]
 async fn main() -> Result<()> {
     // ── Panic handler + logging ──────────────────────────────────────────────
+    // Load .env BEFORE the subscriber so RUST_LOG from .env takes effect.
+    // Config::from_env() also calls dotenv() — the second call is a no-op.
+    let _ = dotenvy::dotenv();
     install_panic()?;
     tracing_subscriber::registry()
         .with(EnvFilter::from_env("RUST_LOG"))
