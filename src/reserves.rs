@@ -185,6 +185,10 @@ pub struct ResolvedPosition {
     pub collateral_asset:     Address,
     pub collateral_bonus_bps: u128,
     pub debt_asset:           Address,
+    /// Total debt in raw token atoms (from getUserReserveData.currentVariableDebt +
+    /// currentStableDebt). Use this — not the USD approximation — when passing
+    /// debtAmount to requestFlashLiquidation / flashLoanSimple.
+    pub debt_amount_raw:      u128,
     /// Best estimate of liquidation bonus in bps (from collateral reserve config).
     pub bonus_bps:            u128,
     /// True if collateral and debt are in the same asset family (e.g. WETH/weETH).
@@ -248,7 +252,7 @@ async fn resolve_single<P: Provider>(
 
     // Parse results: find best collateral and debt
     let mut best_collateral: Option<(Address, u128, u128)> = None; // (addr, atoken_balance, bonus_bps)
-    let mut best_debt:       Option<(Address, u128)>       = None; // (addr, total_debt)
+    let mut best_debt:       Option<(Address, u128)>       = None; // (addr, total_debt_raw_atoms)
 
     for (reserve, result) in cache.reserves.iter().zip(results.iter()) {
         if !result.success || result.returnData.is_empty() {
@@ -277,8 +281,8 @@ async fn resolve_single<P: Provider>(
         }
     }
 
-    let (coll_addr, _, bonus_bps) = best_collateral?;
-    let (debt_addr, _)            = best_debt?;
+    let (coll_addr, _, bonus_bps)  = best_collateral?;
+    let (debt_addr, debt_raw)      = best_debt?;
 
     let coll_family = constants::asset_family_by_addr(coll_addr);
     let debt_family = constants::asset_family_by_addr(debt_addr);
@@ -290,6 +294,7 @@ async fn resolve_single<P: Provider>(
         collateral_asset:     coll_addr,
         collateral_bonus_bps: bonus_bps,
         debt_asset:           debt_addr,
+        debt_amount_raw:      debt_raw,
         bonus_bps,
         is_delta_neutral,
     })

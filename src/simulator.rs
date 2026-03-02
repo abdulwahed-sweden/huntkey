@@ -70,7 +70,7 @@ pub async fn simulate_on_chain<P: Provider>(
     let call_result = contract
         .requestFlashLiquidation(
             opp.debt_asset,
-            U256::from(opp.debt_to_repay),
+            U256::from(opp.debt_to_repay_raw), // raw token atoms — NOT whole USD dollars
             opp.collateral_asset,
             opp.borrower,
         )
@@ -101,7 +101,7 @@ pub async fn simulate_on_chain<P: Provider>(
     let gas_est = contract
         .requestFlashLiquidation(
             opp.debt_asset,
-            U256::from(opp.debt_to_repay),
+            U256::from(opp.debt_to_repay_raw), // raw token atoms — NOT whole USD dollars
             opp.collateral_asset,
             opp.borrower,
         )

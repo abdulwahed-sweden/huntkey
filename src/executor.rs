@@ -122,7 +122,7 @@ impl HuntLoanExecutor {
             let calldata = Bytes::from(
                 IHuntLoanReceiver::requestFlashLiquidationCall {
                     debtAsset:       opp.debt_asset,
-                    debtAmount:      U256::from(opp.debt_to_repay),
+                    debtAmount:      U256::from(opp.debt_to_repay_raw), // raw token atoms
                     collateralAsset: opp.collateral_asset,
                     borrower:        opp.borrower,
                 }
@@ -182,7 +182,7 @@ impl HuntLoanExecutor {
         let sent1 = contract
             .requestFlashLiquidation(
                 opp.debt_asset,
-                U256::from(opp.debt_to_repay),
+                U256::from(opp.debt_to_repay_raw), // raw token atoms
                 opp.collateral_asset,
                 opp.borrower,
             )
@@ -196,7 +196,7 @@ impl HuntLoanExecutor {
         let sent2 = contract
             .requestFlashLiquidation(
                 opp.debt_asset,
-                U256::from(opp.debt_to_repay),
+                U256::from(opp.debt_to_repay_raw), // raw token atoms
                 opp.collateral_asset,
                 opp.borrower,
             )
@@ -286,7 +286,7 @@ impl HuntLoanExecutor {
             let calldata = Bytes::from(
                 IHuntLoanReceiver::requestFlashLiquidationCall {
                     debtAsset:        opp.debt_asset,
-                    debtAmount:       U256::from(opp.debt_to_repay),
+                    debtAmount:       U256::from(opp.debt_to_repay_raw), // raw token atoms
                     collateralAsset:  opp.collateral_asset,
                     borrower:         opp.borrower,
                 }
@@ -307,7 +307,8 @@ impl HuntLoanExecutor {
                 calldata_bytes       = calldata.len(),
                 calldata             = %calldata,
                 borrower             = %opp.borrower,
-                debt_to_repay        = opp.debt_to_repay,
+                debt_to_repay_usd    = opp.debt_to_repay,
+                debt_to_repay_raw    = opp.debt_to_repay_raw,
                 collateral           = %opp.collateral_asset,
                 debt_asset           = %opp.debt_asset,
                 estimated_profit_usd = sim.net_profit_usd,
@@ -382,7 +383,7 @@ impl HuntLoanExecutor {
             let call = contract
                 .requestFlashLiquidation(
                     opp.debt_asset,
-                    U256::from(opp.debt_to_repay),
+                    U256::from(opp.debt_to_repay_raw), // raw token atoms
                     opp.collateral_asset,
                     opp.borrower,
                 )

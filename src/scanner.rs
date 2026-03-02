@@ -87,8 +87,11 @@ pub struct Opportunity {
     pub collateral_asset:     Address,
     /// Resolved on-chain debt asset address.
     pub debt_asset:           Address,
-    /// 50% of total debt (Aave V3 max per liquidation call).
+    /// 50% of total debt in whole USD dollars — used only for profit math.
     pub debt_to_repay:        u128,
+    /// 50% of total debt in raw token atoms — passed to requestFlashLiquidation.
+    /// Sourced from getUserReserveData.currentVariableDebt (correct units).
+    pub debt_to_repay_raw:    u128,
     /// Actual liquidation bonus from Aave reserve config (bps, e.g. 500 = 5%).
     pub liquidation_bonus_bps: u128,
     pub estimated_profit_usd: i128,
@@ -151,7 +154,11 @@ pub async fn scan<P: Provider>(
             continue;
         }
 
+        // USD approximation (whole dollars) — used only for profit pre-screen math.
         let debt_to_repay = debt_usd / 2;
+        // Raw token atoms from getUserReserveData — used for the actual flash loan call.
+        let debt_to_repay_raw = pos.debt_amount_raw / 2;
+
         let sim = math::simulate(
             debt_to_repay,
             *coll_usd,
@@ -165,13 +172,14 @@ pub async fn scan<P: Provider>(
         }
 
         info!(
-            borrower  = %borrower,
-            hf        = hf,
-            debt_usd  = debt_usd,
-            coll      = %pos.collateral_asset,
-            debt      = %pos.debt_asset,
-            bonus_bps = pos.bonus_bps,
-            profit    = sim.net_profit_usd,
+            borrower          = %borrower,
+            hf                = hf,
+            debt_usd          = debt_usd,
+            debt_to_repay_raw = debt_to_repay_raw,
+            coll              = %pos.collateral_asset,
+            debt              = %pos.debt_asset,
+            bonus_bps         = pos.bonus_bps,
+            profit            = sim.net_profit_usd,
             "Opportunity found"
         );
 
@@ -183,6 +191,7 @@ pub async fn scan<P: Provider>(
             collateral_asset:      pos.collateral_asset,
             debt_asset:            pos.debt_asset,
             debt_to_repay,
+            debt_to_repay_raw,
             liquidation_bonus_bps: pos.bonus_bps,
             estimated_profit_usd:  sim.net_profit_usd,
         });
@@ -297,7 +306,7 @@ async fn hf_batch_raw<P: Provider>(
         if hf_raw == 0 { continue; }
 
         let hf: f64  = hf_raw as f64 / 1e18;
-        let debt_usd = data.totalDebtBase.try_into().unwrap_or(0_u128) / 100; // 8-dec → 6-dec
+        let debt_usd = data.totalDebtBase.try_into().unwrap_or(0_u128) / 100; // centi-dollars → whole USD
 
         if debt_usd == 0 { continue; }
 
@@ -348,8 +357,8 @@ async fn hf_chunk_full<P: Provider>(
         }
 
         let hf: f64   = hf_raw as f64 / 1e18;
-        let debt_usd  = data.totalDebtBase.try_into().unwrap_or(0_u128) / 100;
-        let coll_usd  = data.totalCollateralBase.try_into().unwrap_or(0_u128) / 100;
+        let debt_usd  = data.totalDebtBase.try_into().unwrap_or(0_u128) / 100; // centi-dollars → whole USD
+        let coll_usd  = data.totalCollateralBase.try_into().unwrap_or(0_u128) / 100; // centi-dollars → whole USD
 
         if debt_usd == 0 || coll_usd == 0 { continue; }
 
