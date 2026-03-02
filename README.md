@@ -1,22 +1,12 @@
 # HuntLoan
 
-Automated Aave V3 flash-loan liquidation engine for Base mainnet.
+Aave V3 flash-loan liquidation bot for Base mainnet.
+
+Monitors 44,000+ borrowing positions, detects undercollateralised accounts, simulates profitability, and executes atomic flash-loan liquidations — all within a single block.
 
 **Stack:** Rust (execution engine) + Solidity (on-chain flash receiver)
 **Network:** Base Mainnet (Chain ID 8453)
-**Contract:** `0x0A0fE1f59D56716aF5c4C9D7688df742EE5949D3`
-
----
-
-## What It Does
-
-1. **Monitors** Aave V3 borrowing positions via Multicall3 (500 addresses per RPC call)
-2. **Detects** undercollateralised positions (Health Factor < 1.0)
-3. **Simulates** liquidation profitability via `eth_call` before any broadcast
-4. **Executes** flash-loan liquidations atomically — borrow, liquidate, swap, repay
-5. **Alerts** via Telegram at every stage of the pipeline
-
-No pre-positioned capital required. Each liquidation is self-funded within a single atomic transaction.
+**Contract:** [`0x60d0C491dF2d35E4C95D98dF37897f908b04b46f`](https://basescan.org/address/0x60d0C491dF2d35E4C95D98dF37897f908b04b46f)
 
 ---
 
@@ -24,52 +14,127 @@ No pre-positioned capital required. Each liquidation is self-funded within a sin
 
 ```
 WebSocket block header
-  └─► scanner (Multicall3 batch)
-        └─► simulator (eth_call)
-              └─► executor (EIP-1559 tx → Base)
+  └─► Scanner (Multicall3 batch — 500 addresses/call)
+        └─► Simulator (eth_call profitability check)
+              └─► Executor (EIP-1559 tx → Base)
                     └─► HuntLoanFlashReceiver.sol
                           └─► Aave V3 flashLoanSimple → liquidate → swap → repay
 ```
 
-See `docs/ARCHITECTURE.md` for the full module reference and design decisions.
+No pre-positioned capital required. Each liquidation is self-funded within a single atomic transaction via Aave V3 flash loans.
 
 ---
 
-## Quickstart
+## Key Features
+
+- **Velocity-based ETA prediction** — tracks health factor trajectory to anticipate liquidations before they happen
+- **Dual-shot parallel execution** — submits two gas tiers simultaneously for time-critical opportunities
+- **Regime-aware gas pricing** — adjusts gas strategy based on network congestion (stable / busy / crash)
+- **Multi-DEX swap routing** — Uniswap V3 (3 fee tiers) + Aerodrome (volatile + stable) with automatic fallback
+- **Circuit breaker** — halts execution on repeated failures, sends emergency Telegram alert
+- **7-class Telegram alerts** — boot, liquidation, execution failed, emergency stop, status report, target locked, target approaching
+- **Smart token resolution** — displays human-readable token names (WETH, USDC, cbBTC) instead of hex addresses
+- **Human-readable error decoding** — translates Aave/contract revert codes into plain English
+- **Watchlist auto-refresh** — pulls ~45K active borrowers from Goldsky subgraph every ~10 minutes
+
+---
+
+## Source Layout
+
+```
+src/
+  main.rs          — entry point, config loading, boot alert
+  engine.rs        — main orchestration loop (block → scan → simulate → execute)
+  scanner.rs       — Multicall3 batch scanning
+  simulator.rs     — eth_call profitability simulation
+  executor.rs      — EIP-1559 transaction broadcast
+  alerts.rs        — Telegram notifications (v3 — 7 alert classes)
+  config.rs        — environment config loading
+  constants.rs     — addresses and constants
+  discovery.rs     — Goldsky subgraph watchlist refresh
+  gas.rs           — regime-aware gas estimation
+  math.rs          — profit math, fixed-point arithmetic
+  oracle.rs        — price oracle with REST fallback
+  reserves.rs      — Aave V3 reserve data cache
+  trades.rs        — trade record keeping, daily budget reset
+  velocity.rs      — health factor velocity tracking + ETA prediction
+  abi/             — ABI definitions
+
+contracts/
+  HuntLoanFlashReceiver.sol  — on-chain flash receiver + swap routing + profit tracking
+
+script/
+  Deploy.s.sol               — Foundry deployment script
+```
+
+---
+
+## Smart Contract
+
+**HuntLoanFlashReceiver** handles the on-chain execution:
+
+1. Receives flash loan from Aave V3
+2. Executes `liquidationCall` on the underwater position
+3. Swaps seized collateral back to debt token via best available DEX route
+4. Repays flash loan + 0.05% premium
+5. Keeps surplus as profit
+
+Additional features:
+- `sweepToUsdc()` — operator converts accumulated non-USDC tokens to USDC
+- `settle()` — distributes profits after 6-month maturity (60% financier / 40% operator)
+- `rescueToken()` — emergency token recovery (owner only)
+- ReentrancyGuard on all entry points
+- `forceApprove` (SafeERC20) on all token approvals
+
+---
+
+## Quick Start
 
 ### Prerequisites
 
-- Rust 1.78+ (`rustup update stable`)
-- An Alchemy (or compatible) Base mainnet RPC with WebSocket support
-- A funded operator wallet (> 0.1 ETH on Base for gas)
+- Rust 1.85+ (`rustup update stable`)
+- Base mainnet RPC with WebSocket support (Alchemy, Infura, etc.)
+- Funded operator wallet (ETH on Base for gas)
 
-### Setup
+### Build
 
 ```bash
-git clone <repo>
+git clone git@github.com:abdulwahed-sweden/huntloan.git
 cd huntloan
-
-# Copy and fill in your credentials
-cp .env.example .env
-# Edit .env — set RPC_URL, WS_RPC_URL, PRIVATE_KEY, HUNTLOAN_CONTRACT
-
-# Build
 cargo build --release
 ```
 
-### Run (dry mode — safe, no transactions sent)
+### Configure
+
+Create `.env` (see Environment Variables below), then:
 
 ```bash
-DRY_RUN=true cargo run --release
+echo '[]' > watchlist.json
+chmod 600 .env
 ```
 
-### Run (live mode)
-
-**Read `docs/SAFETY_GUIDE.md` first — mandatory pre-launch checklist.**
+### Run
 
 ```bash
-DRY_RUN=false cargo run --release
+# Dry run — monitors and simulates, never sends transactions
+DRY_RUN=true ./target/release/huntloan
+
+# Production — with PM2
+pm2 start ecosystem.config.js
+pm2 save && pm2 startup
 ```
+
+---
+
+## Operating Modes
+
+| Mode | Behavior |
+|---|---|
+| `DRY_RUN=true` | Scans and simulates only. No transactions sent. Safe for testing. |
+| `SOFT_LIVE=true` | Sends transactions but with extra conservative thresholds. |
+| `DRY_RUN=false` | Full live execution. Sends real transactions on Base mainnet. |
+
+Recommended progression: DRY_RUN → SOFT_LIVE → LIVE.
 
 ---
 
@@ -77,27 +142,44 @@ DRY_RUN=false cargo run --release
 
 ```bash
 # Network
-RPC_URL=https://base-mainnet.g.alchemy.com/v2/YOUR_KEY
-WS_RPC_URL=wss://base-mainnet.g.alchemy.com/v2/YOUR_KEY
+RPC_URL=                    # Base mainnet HTTPS RPC endpoint
+WS_RPC_URL=                 # Base mainnet WebSocket RPC endpoint
 
 # Wallet
-PRIVATE_KEY=0x...
+PRIVATE_KEY=                # Operator wallet private key (hex, with 0x prefix)
+OPERATOR_ADDRESS=           # Operator wallet address
 
 # Contracts
-HUNTLOAN_CONTRACT=0x0A0fE1f59D56716aF5c4C9D7688df742EE5949D3
+HUNTLOAN_CONTRACT=          # Deployed HuntLoanFlashReceiver address
+AAVE_POOL=                  # Aave V3 Pool address on Base
+AAVE_ADDRESSES_PROVIDER=    # Aave V3 PoolAddressesProvider address
 
-# Bot settings
-DRY_RUN=true                    # Set to false for live execution
-MIN_PROFIT_USD=10               # Minimum net profit to attempt
-WATCHLIST_PATH=watchlist.json   # Path to borrower watchlist
+# Telegram Alerts
+TELEGRAM_BOT_TOKEN=         # Telegram bot token from @BotFather
+TELEGRAM_CHAT_ID=           # Telegram chat ID for alerts
 
-# Optional — MEV protection (recommended for live)
-PRIVATE_RPC_URL=https://...
+# Bot Settings
+DRY_RUN=true                # true = simulate only, false = live execution
+WATCHLIST_PATH=watchlist.json
+MIN_PROFIT_USD=10           # Minimum net profit (USD) to attempt liquidation
+MAX_GAS_COST_WEI=8000000000000000   # Max gas cost per tx (wei)
+MAX_BRIBE_WEI=50000000000000000     # Max priority fee for MEV protection
 
-# Alerts
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_CHAT_ID=...
+# Logging
+RUST_LOG=huntloan=info      # Tracing filter
 ```
+
+---
+
+## Key Addresses (Base Mainnet)
+
+| Contract | Address |
+|---|---|
+| HuntLoanFlashReceiver | `0x60d0C491dF2d35E4C95D98dF37897f908b04b46f` |
+| Aave V3 Pool | `0xA238Dd80C259a72e81d7e4664a9801593F98d1c5` |
+| Uniswap V3 Router | `0x2626664c2603336E57B271c5C0b26F421741e481` |
+| Aerodrome Router | `0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43` |
+| Multicall3 | `0xcA11bde05977b3631167028862bE2a173976CA11` |
 
 ---
 
@@ -107,64 +189,22 @@ TELEGRAM_CHAT_ID=...
 cargo test
 ```
 
-12 unit tests across `gas.rs`, `math.rs`, `velocity.rs`, `oracle.rs`.
+22 unit tests across `alerts.rs`, `gas.rs`, `math.rs`, `velocity.rs`, `oracle.rs`.
 
 ---
 
-## Watchlist
+## Deployment
 
-The engine watches borrowers listed in `watchlist.json`:
-
-```json
-[
-  "0xabc...",
-  "0xdef..."
-]
-```
-
-On startup and every ~10 minutes, the engine queries the Goldsky subgraph to refresh
-this list with current active borrowers from Aave V3 Base.
-
-To seed manually:
-```bash
-echo '["0x..."]' > watchlist.json
-```
+Production runs on a hardened Ubuntu VPS:
+- Non-root user with sudo
+- SSH key-only auth, root login disabled
+- UFW firewall (port 22 only)
+- fail2ban active
+- PM2 process manager with auto-restart
+- `.env` file with `chmod 600`
 
 ---
 
-## Key Addresses (Base Mainnet)
+## License
 
-| Contract | Address |
-|---|---|
-| HuntLoanFlashReceiver | `0x0A0fE1f59D56716aF5c4C9D7688df742EE5949D3` |
-| Aave V3 Pool | `0xA238Dd80C259a72e81d7e4664a9801593F98d1c5` |
-| Uniswap V3 Router | `0x2626664c2603336E57B271c5C0b26F421741e481` |
-| Aerodrome Router | `0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43` |
-| Multicall3 | `0xcA11bde05977b3631167028862bE2a173976CA11` |
-
----
-
-## Documentation
-
-| Doc | Description |
-|---|---|
-| `docs/ARCHITECTURE.md` | Full module reference, pipeline diagram, design decisions |
-| `docs/PRODUCTION_READY.md` | Pre-mainnet audit report, risk analysis, readiness verdict |
-| `docs/SAFETY_GUIDE.md` | Mandatory pre-launch checklist, monitoring, emergency stop |
-| `docs/DECOMMISSION_OLD_SYSTEM.md` | Safe shutdown procedure for legacy Bitcoin-Sentinel bot |
-| `MIGRATION_REPORT.md` | Full migration log from Node.js to Rust |
-
----
-
-## Profit Distribution
-
-The HuntLoanFlashReceiver contract accumulates profit in USDC.
-After 6 months (maturity), `settle()` distributes:
-- **Financier:** capital recovery + 60% of net profit
-- **Operator:** 40% of net profit
-
-Check accumulated profit:
-```bash
-cast call 0x0A0fE1f59D56716aF5c4C9D7688df742EE5949D3 \
-  "totalProfit()(uint256)" --rpc-url $RPC_URL
-```
+MIT
