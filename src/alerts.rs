@@ -1,16 +1,16 @@
-/// HuntLoan Telegram notification module — high-signal only.
-///
-/// Alert classes:
-///
-///   A) EXECUTED    — live tx confirmed on-chain (success or revert)
-///   B) FAILED      — execution attempt failed (send error / revert)
-///   C) CIRCUIT     — engine stopped by circuit breaker
-///   D) SUMMARY     — hourly/daily operational summary
-///   E) OPPORTUNITY — best candidate locked in, about to execute
-///   F) APPROACHING — warm-zone borrower ETA < 10 min
-///
-/// NO per-block alerts. NO simulation pass/fail spam.
-/// Rate-limited per category, deduplicated per target, silent on missing creds.
+//! HuntLoan Telegram notification module — high-signal only.
+//!
+//! Alert classes:
+//!
+//!   A) EXECUTED    — live tx confirmed on-chain (success or revert)
+//!   B) FAILED      — execution attempt failed (send error / revert)
+//!   C) CIRCUIT     — engine stopped by circuit breaker
+//!   D) SUMMARY     — hourly/daily operational summary
+//!   E) OPPORTUNITY — best candidate locked in, about to execute
+//!   F) APPROACHING — warm-zone borrower ETA < 10 min
+//!
+//! NO per-block alerts. NO simulation pass/fail spam.
+//! Rate-limited per category, deduplicated per target, silent on missing creds.
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
@@ -32,10 +32,8 @@ fn throttle_guard(key: &str, limit: Duration) -> bool {
     if limit.is_zero() { return true; }
     let mut guard = ALERT_STATE.lock().unwrap();
     let map = guard.get_or_insert_with(HashMap::new);
-    if let Some(last) = map.get(key) {
-        if last.elapsed() < limit {
-            return false; // still throttled
-        }
+    if map.get(key).is_some_and(|last| last.elapsed() < limit) {
+        return false; // still throttled
     }
     map.insert(key.to_string(), Instant::now());
     true
@@ -108,16 +106,14 @@ pub async fn send_telegram(
     let chat_id = std::env::var("TELEGRAM_CHAT_ID").unwrap_or_default();
     if token.is_empty() || chat_id.is_empty() { return Ok(()); }
 
-    if let Some(key) = dedupe_key {
-        if !throttle_guard(key, Duration::from_secs(throttle_secs)) {
-            return Ok(());
-        }
+    if let Some(key) = dedupe_key && !throttle_guard(key, Duration::from_secs(throttle_secs)) {
+        return Ok(());
     }
 
     let mut message = text.into();
     if message.len() > 4000 {
         message.truncate(3997);
-        message.push_str("…");
+        message.push('…');
     }
 
     let client = Client::new();
@@ -167,6 +163,7 @@ fn uptime_str(secs: u64) -> String {
 // ── CLASS A: EXECUTED ────────────────────────────────────────────────────────
 
 /// Fired once per confirmed tx (status=1 success or status=0 revert on-chain).
+#[allow(clippy::too_many_arguments)]
 pub fn fmt_executed(
     borrower:       &str,
     hf:             f64,
@@ -244,6 +241,7 @@ pub fn fmt_circuit_breaker(trigger: &str, detail: &str) -> String {
 // ── CLASS D: SUMMARY ─────────────────────────────────────────────────────────
 
 /// Fired on a configurable interval (default: hourly).
+#[allow(clippy::too_many_arguments)]
 pub fn fmt_summary(
     uptime_secs:    u64,
     blocks:         u64,
@@ -359,6 +357,7 @@ pub async fn send_approaching(borrower: &str, hf: f64, eta_min: f64, throttle_se
 
 /// Send a pre-formatted message using explicit token + chat_id.
 /// Used at startup before config is available. Never panics.
+#[allow(dead_code)]
 pub async fn send_telegram_raw(token: &str, chat_id: &str, text: &str) {
     let client = Client::new();
     let url    = format!("https://api.telegram.org/bot{token}/sendMessage");
@@ -375,6 +374,7 @@ pub async fn send_telegram_raw(token: &str, chat_id: &str, text: &str) {
 
 // ── Legacy formatters (kept for backward compatibility, not called by engine) ─
 
+#[allow(dead_code)]
 pub fn fmt_critical(addr: &str, hf: f64, debt_usd: f64, est_profit_usd: f64, eta: Option<&str>, tier: &str) -> String {
     let drop_pct = if hf > 0.0 { (1.0 - 1.0 / hf) * 100.0 } else { 0.0 };
     let header = match tier {
@@ -402,6 +402,7 @@ pub fn fmt_critical(addr: &str, hf: f64, debt_usd: f64, est_profit_usd: f64, eta
     )
 }
 
+#[allow(dead_code)]
 pub fn fmt_profit(net_eth: f64, usd: f64, tx_hash: &str, block_num: u64, target_addr: &str, gas_eth: f64, bribe_eth: f64) -> String {
     let tx_link = format!("https://basescan.org/tx/{tx_hash}");
     let gross   = net_eth + gas_eth + bribe_eth;
@@ -424,6 +425,7 @@ pub fn fmt_profit(net_eth: f64, usd: f64, tx_hash: &str, block_num: u64, target_
     )
 }
 
+#[allow(dead_code)]
 pub fn fmt_regime(regime: &str, eth_usd: f64, pct_change: f64) -> String {
     let sign   = if pct_change >= 0.0 { "+" } else { "" };
     let bribes = match regime {

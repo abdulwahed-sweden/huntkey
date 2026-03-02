@@ -1,19 +1,19 @@
-/// HuntLoanEngine — full pipeline coordinator.
-///
-/// Pipeline: block event → scanner → simulator → executor → contract
-///
-/// Architecture:
-///   - WebSocket provider subscribes to new block headers (event-driven, <50ms target)
-///   - HTTP provider (wallet-backed) used for simulation and execution
-///   - Each block triggers: scan → simulate (parallel JoinSet) → execute best opportunity
-///   - Timing metrics logged for every stage
-///   - Telegram alerts fired only on: EXECUTED, FAILED, CIRCUIT_BREAKER, SUMMARY
-///   - VelocityEngine records HF per borrower to compute ETA
-///
-/// Phases implemented:
-///   PHASE 1 — High-signal Telegram alerts (4 classes, rate-limited)
-///   PHASE 2 — Execution filters (STRONG_HF, margin, blacklist, daily budget)
-///   PHASE 3 — Parallel JoinSet simulation + score-based candidate priority
+//! HuntLoanEngine — full pipeline coordinator.
+//!
+//! Pipeline: block event → scanner → simulator → executor → contract
+//!
+//! Architecture:
+//!   - WebSocket provider subscribes to new block headers (event-driven, <50ms target)
+//!   - HTTP provider (wallet-backed) used for simulation and execution
+//!   - Each block triggers: scan → simulate (parallel JoinSet) → execute best opportunity
+//!   - Timing metrics logged for every stage
+//!   - Telegram alerts fired only on: EXECUTED, FAILED, CIRCUIT_BREAKER, SUMMARY
+//!   - VelocityEngine records HF per borrower to compute ETA
+//!
+//! Phases implemented:
+//!   PHASE 1 — High-signal Telegram alerts (4 classes, rate-limited)
+//!   PHASE 2 — Execution filters (STRONG_HF, margin, blacklist, daily budget)
+//!   PHASE 3 — Parallel JoinSet simulation + score-based candidate priority
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -348,12 +348,10 @@ impl HuntLoanEngine {
         {
             let ve = self.velocity.lock().await;
             for wc in &warm {
-                if let Some(eta) = ve.eta_minutes(&wc.borrower) {
-                    if eta > 0.0 && eta < 10.0 {
-                        let addr = format!("{}", wc.borrower);
-                        let hf   = wc.health_factor;
-                        alerts::send_approaching(&addr, hf, eta, 0).await;
-                    }
+                if let Some(eta) = ve.eta_minutes(&wc.borrower) && eta > 0.0 && eta < 10.0 {
+                    let addr = format!("{}", wc.borrower);
+                    let hf   = wc.health_factor;
+                    alerts::send_approaching(&addr, hf, eta, 0).await;
                 }
             }
         }

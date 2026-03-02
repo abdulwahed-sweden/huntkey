@@ -40,6 +40,7 @@ pub struct ExecutionResult {
     pub block_number:    u64,
     pub gas_used:        u64,
     /// Wall-clock ms from execute() call to confirmed receipt.
+    #[allow(dead_code)]
     pub send_latency_ms: u64,
 }
 
@@ -217,7 +218,7 @@ impl HuntLoanExecutor {
                         pending.get_receipt().await.ok().map(|receipt| ExecutionResult {
                             tx_hash:         h,
                             block_number:    receipt.block_number.unwrap_or(0),
-                            gas_used:        receipt.gas_used as u64,
+                            gas_used:        receipt.gas_used,
                             send_latency_ms: t.elapsed().as_millis() as u64,
                         })
                     }
@@ -231,7 +232,7 @@ impl HuntLoanExecutor {
                         pending.get_receipt().await.ok().map(|receipt| ExecutionResult {
                             tx_hash:         h,
                             block_number:    receipt.block_number.unwrap_or(0),
-                            gas_used:        receipt.gas_used as u64,
+                            gas_used:        receipt.gas_used,
                             send_latency_ms: t.elapsed().as_millis() as u64,
                         })
                     }
@@ -409,7 +410,7 @@ impl HuntLoanExecutor {
                     match pending.get_receipt().await {
                         Ok(receipt) => {
                             let block_number = receipt.block_number.unwrap_or(0);
-                            let gas_used = receipt.gas_used as u64;
+                            let gas_used = receipt.gas_used;
                             let send_ms = t.elapsed().as_millis() as u64;
                             self.confirm_nonce(nonce).await;
                             info!(
@@ -483,7 +484,7 @@ impl HuntLoanExecutor {
 
     async fn confirm_nonce(&self, sent_nonce: u64) {
         let mut guard = self.nonce.lock().await;
-        if guard.map_or(true, |n| sent_nonce + 1 > n) {
+        if guard.is_none_or(|n| sent_nonce + 1 > n) {
             *guard = Some(sent_nonce + 1);
         }
     }

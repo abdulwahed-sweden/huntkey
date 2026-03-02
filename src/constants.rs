@@ -1,7 +1,8 @@
-/// HuntLoan constants — all Base mainnet addresses and protocol thresholds.
-///
-/// Ported from: Bitcoin-Sentinel/eth_forensics/simulation/scripts/monitor_base.js (ADDRS block)
-/// and deployment_flash.json (contract addresses).
+//! HuntLoan constants — all Base mainnet addresses and protocol thresholds.
+//!
+//! Ported from: Bitcoin-Sentinel/eth_forensics/simulation/scripts/monitor_base.js (ADDRS block)
+//! and deployment_flash.json (contract addresses).
+#![allow(dead_code)]
 
 use alloy::primitives::{address, Address};
 

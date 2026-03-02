@@ -1,8 +1,8 @@
-/// Profitability math for flash loan liquidations.
-///
-/// Aave V3 flash loan fee: 0.05% (5 bps) of the borrowed amount.
-/// Gas cost on Base L2: estimated at 800K gas × current base fee.
-/// Net profit = liquidation bonus - flash fee - gas cost.
+//! Profitability math for flash loan liquidations.
+//!
+//! Aave V3 flash loan fee: 0.05% (5 bps) of the borrowed amount.
+//! Gas cost on Base L2: estimated at 800K gas × current base fee.
+//! Net profit = liquidation bonus - flash fee - gas cost.
 
 /// Aave V3 flash loan fee numerator (0.05% = 5 / 10_000)
 const FLASH_FEE_BPS: u128 = 5;
@@ -13,6 +13,7 @@ const BPS_DENOM: u128 = 10_000;
 pub struct SimResult {
     pub gross_usd: u128,       // collateral seized value in USD (6-dec, USDC-normalised)
     pub flash_fee_usd: u128,   // 0.05% of borrowed amount
+    #[allow(dead_code)]
     pub gas_cost_usd: u128,    // estimated gas in USD
     pub net_profit_usd: i128,  // gross - flash_fee - gas (can be negative)
     pub profitable: bool,
@@ -28,7 +29,7 @@ pub struct SimResult {
 /// * `eth_price_usd`       — current ETH price in USD (no decimals)
 pub fn simulate(
     debt_to_repay_usd: u128,
-    collateral_usd: u128,
+    _collateral_usd: u128,
     liquidation_bonus_bps: u128,
     gas_price_gwei: u128,
     eth_price_usd: u128,
@@ -57,6 +58,7 @@ pub fn simulate(
     }
 }
 
+#[allow(dead_code)]
 /// Distribute net profits per the investment agreement:
 ///   - Saeed (financier): 60% of net profit + full capital recovery
 ///   - Omar  (operator):  40% of net profit (zero if net profit is negative)

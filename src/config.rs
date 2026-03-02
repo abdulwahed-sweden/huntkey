@@ -27,7 +27,9 @@ pub struct Config {
     pub aave_pool:     Address,       // AAVE_POOL (defaults to Base mainnet)
 
     // [TELEGRAM]
+    #[allow(dead_code)]
     pub telegram_token:   Option<String>, // TELEGRAM_BOT_TOKEN
+    #[allow(dead_code)]
     pub telegram_chat_id: Option<String>, // TELEGRAM_CHAT_ID
 
     // [BOT SETTINGS]
@@ -36,7 +38,9 @@ pub struct Config {
     /// Sign + print full tx preview, do NOT broadcast. Requires DRY_RUN=false.
     pub soft_live:        bool,       // SOFT_LIVE — preview mode
     pub min_profit_usd:   f64,        // MIN_PROFIT_USD
+    #[allow(dead_code)]
     pub max_gas_cost_wei: u128,       // MAX_GAS_COST_WEI
+    #[allow(dead_code)]
     pub max_bribe_wei:    u128,       // MAX_BRIBE_WEI
 
     // [CIRCUIT BREAKER]

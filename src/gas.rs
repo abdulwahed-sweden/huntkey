@@ -1,8 +1,8 @@
-/// gas.rs — EIP-1559 fee + bribe computation.
-///
-/// Ported from: Bitcoin-Sentinel/eth_forensics/simulation/scripts/gas_strategy.js
-/// Logic: three tiers (PROBE / STRIKE / KILL) × three regimes (STABLE / VOLATILE / CRASH).
-/// All caps enforced at compute time.
+//! gas.rs — EIP-1559 fee + bribe computation.
+//!
+//! Ported from: Bitcoin-Sentinel/eth_forensics/simulation/scripts/gas_strategy.js
+//! Logic: three tiers (PROBE / STRIKE / KILL) × three regimes (STABLE / VOLATILE / CRASH).
+//! All caps enforced at compute time.
 
 use crate::constants::{
     MAX_BRIBE_WEI, MAX_GAS_COST_WEI, MIN_NET_PROFIT_USD, MIN_WALLET_ETH,
@@ -26,6 +26,7 @@ pub enum Regime {
 /// Computed gas parameters for one tier × regime combination.
 #[derive(Debug, Clone)]
 pub struct GasTier {
+    #[allow(dead_code)]
     pub label:                  &'static str,
     pub max_fee_per_gas:        u128, // wei
     pub max_priority_fee:       u128, // wei
@@ -109,6 +110,7 @@ pub fn detect_regime(pct_change_5m: f64) -> Regime {
 }
 
 /// Bribe fraction based on HF urgency (used when gas tier bribe is overridden).
+#[allow(dead_code)]
 pub fn bribe_by_hf(hf: f64) -> f64 {
     if hf <= 1.005 { BRIBE_ULTRA }
     else if hf <= 1.010 { BRIBE_CRASH }
@@ -125,6 +127,7 @@ pub fn compute_bribe_wei(gross_profit_wei: u128, bribe_fraction: f64) -> u128 {
 
 /// Validate all safety caps before broadcast.
 /// Returns Ok(()) or Err with the blocking reason.
+#[allow(dead_code)]
 pub fn validate_caps(
     gas_cost_wei:   u128,
     bribe_wei:      u128,

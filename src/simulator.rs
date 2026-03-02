@@ -46,6 +46,7 @@ pub struct SimOutput {
     /// Revert reason string if simulation failed.
     pub revert_reason:    Option<String>,
     /// Wall-clock time for the eth_call simulation (ms).
+    #[allow(dead_code)]
     pub sim_latency_ms:   u64,
 }
 
@@ -152,6 +153,7 @@ pub async fn simulate_on_chain<P: Provider>(
 
 /// Validate that contract address is set (not zero).
 /// Called at startup to warn operator before the engine subscribes to blocks.
+#[allow(dead_code)]
 pub fn validate_contract_addr(addr: Address) -> bool {
     addr != Address::ZERO
 }

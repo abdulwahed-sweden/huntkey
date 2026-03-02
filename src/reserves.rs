@@ -10,7 +10,7 @@
 ///   1. Batch getUserReserveData for every Aave V3 reserve via Multicall3
 ///      (one RPC call regardless of number of reserves)
 ///   2. Collect candidates: collateral reserves (aTokenBalance > 0 && enabled)
-///                          and debt reserves (variableDebt > 0)
+///      and debt reserves (variableDebt > 0)
 ///   3. Select highest-value collateral + highest-value debt
 ///   4. Return (collateral_addr, debt_addr, liquidation_bonus_bps)
 ///
@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use alloy::{
-    primitives::{address, Address, Bytes},
+    primitives::{Address, Bytes},
     providers::Provider,
     sol,
     sol_types::SolCall,
@@ -98,6 +98,7 @@ pub struct ReserveInfo {
     /// liquidationBonus field: bonus_bps = liquidationBonus - 10_000.
     pub liquidation_bonus_bps: u128,
     /// Asset family for delta-neutral detection (from address lookup).
+    #[allow(dead_code)]
     pub family:                constants::AssetFamily,
 }
 
@@ -185,6 +186,7 @@ impl ReserveCache {
 #[derive(Debug, Clone)]
 pub struct ResolvedPosition {
     pub collateral_asset:     Address,
+    #[allow(dead_code)]
     pub collateral_bonus_bps: u128,
     pub debt_asset:           Address,
     /// Total debt in raw token atoms (from getUserReserveData.currentVariableDebt +
@@ -218,7 +220,7 @@ pub async fn resolve_positions<P: Provider + Clone + Send + Sync + 'static>(
         let prov  = provider.clone();
         let cache = cache.clone();
         join_set.spawn(async move {
-            let pos = resolve_single(&*prov, &*cache, borrower).await;
+            let pos = resolve_single(&prov, &cache, borrower).await;
             (borrower, pos)
         });
     }
@@ -277,17 +279,13 @@ async fn resolve_single<P: Provider>(
         let total_debt  = var_debt + stb_debt;
 
         // Collateral: positive aToken balance AND enabled as collateral
-        if atoken_bal > 0 && data.usedAsCollateralEnabled {
-            if best_collateral.map_or(true, |(_, bal, _)| atoken_bal > bal) {
-                best_collateral = Some((reserve.address, atoken_bal, reserve.liquidation_bonus_bps));
-            }
+        if atoken_bal > 0 && data.usedAsCollateralEnabled && best_collateral.is_none_or(|(_, bal, _)| atoken_bal > bal) {
+            best_collateral = Some((reserve.address, atoken_bal, reserve.liquidation_bonus_bps));
         }
 
         // Debt: positive variable or stable debt
-        if total_debt > 0 {
-            if best_debt.map_or(true, |(_, d)| total_debt > d) {
-                best_debt = Some((reserve.address, total_debt));
-            }
+        if total_debt > 0 && best_debt.is_none_or(|(_, d)| total_debt > d) {
+            best_debt = Some((reserve.address, total_debt));
         }
     }
 

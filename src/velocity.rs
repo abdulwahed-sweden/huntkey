@@ -113,6 +113,7 @@ impl VelocityEngine {
     }
 
     /// Observation count for an address (useful for logging).
+    #[allow(dead_code)]
     pub fn obs_count(&self, addr: &Address) -> usize {
         self.history.get(addr).map(|v| v.len()).unwrap_or(0)
     }

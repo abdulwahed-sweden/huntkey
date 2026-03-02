@@ -112,8 +112,6 @@ async fn binance_price() -> Result<u128> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn binance_parse_sanity() {
         // Verify the JSON parsing logic with a mock response

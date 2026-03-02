@@ -1,14 +1,14 @@
-/// HuntLoan trade log — appends one CSV row per confirmed broadcast.
-///
-/// File: logs/trades.csv (created if absent, directory auto-created).
-///
-/// Columns:
-///   timestamp, tx_hash, target, debt_asset, collateral_asset,
-///   debt_usd, sim_net_profit_usd, estimated_gas, gas_used,
-///   base_fee_wei, bribe_wei, block_number, status,
-///   scan_ms, sim_ms, exec_ms
-///
-/// Usage: call append_trade() from engine.rs after every confirmed receipt.
+//! HuntLoan trade log — appends one CSV row per confirmed broadcast.
+//!
+//! File: logs/trades.csv (created if absent, directory auto-created).
+//!
+//! Columns:
+//!   timestamp, tx_hash, target, debt_asset, collateral_asset,
+//!   debt_usd, sim_net_profit_usd, estimated_gas, gas_used,
+//!   base_fee_wei, bribe_wei, block_number, status,
+//!   scan_ms, sim_ms, exec_ms
+//!
+//! Usage: call append_trade() from engine.rs after every confirmed receipt.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -65,11 +65,9 @@ pub fn append_trade(r: &TradeRecord<'_>) {
         Err(e) => { warn!("trades.csv: open error: {e}"); return; }
     };
 
-    if needs_header {
-        if let Err(e) = writeln!(file, "{CSV_HEADER}") {
-            warn!("trades.csv: header write error: {e}");
-            return;
-        }
+    if needs_header && let Err(e) = writeln!(file, "{CSV_HEADER}") {
+        warn!("trades.csv: header write error: {e}");
+        return;
     }
 
     if let Err(e) = writeln!(
