@@ -6,7 +6,7 @@
 //!   timestamp, tx_hash, target, debt_asset, collateral_asset,
 //!   debt_usd, sim_net_profit_usd, estimated_gas, gas_used,
 //!   base_fee_wei, bribe_wei, block_number, status,
-//!   scan_ms, sim_ms, exec_ms
+//!   scan_us, sim_us, exec_us
 //!
 //! Usage: call append_trade() from engine.rs after every confirmed receipt.
 
@@ -31,16 +31,16 @@ pub struct TradeRecord<'a> {
     pub bribe_wei:          u128,
     pub block_number:       u64,
     pub status:             u8,   // 1 = success, 0 = failed
-    pub scan_ms:            u128,
-    pub sim_ms:             u128,
-    pub exec_ms:            u128,
+    pub scan_us:            u128,
+    pub sim_us:             u128,
+    pub exec_us:            u128,
 }
 
 const CSV_HEADER: &str =
     "timestamp,tx_hash,target,debt_asset,collateral_asset,\
      debt_usd,sim_net_profit_usd,estimated_gas,gas_used,\
      base_fee_wei,bribe_wei,block_number,status,\
-     scan_ms,sim_ms,exec_ms";
+     scan_us,sim_us,exec_us";
 
 /// Append one trade record to logs/trades.csv.
 /// Creates the logs/ directory and CSV header if needed.
@@ -76,7 +76,7 @@ pub fn append_trade(r: &TradeRecord<'_>) {
         r.timestamp, r.tx_hash, r.target, r.debt_asset, r.collateral_asset,
         r.debt_usd, r.sim_net_profit_usd, r.estimated_gas, r.gas_used,
         r.base_fee_wei, r.bribe_wei, r.block_number, r.status,
-        r.scan_ms, r.sim_ms, r.exec_ms,
+        r.scan_us, r.sim_us, r.exec_us,
     ) {
         warn!("trades.csv: write error: {e}");
     }

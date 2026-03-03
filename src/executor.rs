@@ -8,11 +8,27 @@ use std::time::Instant;
 use alloy::{
     network::EthereumWallet,
     primitives::{Address, Bytes, TxHash, U256},
-    providers::{Provider, ProviderBuilder},
+    providers::{
+        fillers::{
+            BlobGasFiller, ChainIdFiller, FillProvider, GasFiller,
+            JoinFill, NonceFiller, WalletFiller,
+        },
+        Identity, Provider, ProviderBuilder, RootProvider,
+    },
     signers::local::PrivateKeySigner,
     sol,
     sol_types::SolCall,
 };
+
+/// Concrete type returned by `ProviderBuilder::new().wallet(w).connect_http(url)`.
+type DefaultFillers = JoinFill<
+    Identity,
+    JoinFill<GasFiller, JoinFill<BlobGasFiller, JoinFill<NonceFiller, ChainIdFiller>>>,
+>;
+type WalletHttpProvider = FillProvider<
+    JoinFill<DefaultFillers, WalletFiller<EthereumWallet>>,
+    RootProvider,
+>;
 use eyre::{bail, Result, WrapErr};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -56,11 +72,13 @@ struct TxFees {
 ///
 /// Create once at startup and reuse across all blocks.
 pub struct HuntLoanExecutor {
-    config:         Arc<Config>,
-    wallet:         EthereumWallet,
-    signer_address: Address,
+    config:          Arc<Config>,
+    wallet:          EthereumWallet,
+    signer_address:  Address,
     /// Cached nonce — bumped optimistically; reset from chain on error.
-    nonce:          Mutex<Option<u64>>,
+    nonce:           Mutex<Option<u64>>,
+    /// Pre-built HTTP provider for tx submission — avoids rebuilding per-execution.
+    submit_provider: Arc<WalletHttpProvider>,
 }
 
 impl HuntLoanExecutor {
@@ -71,11 +89,22 @@ impl HuntLoanExecutor {
             .wrap_err("PRIVATE_KEY is not a valid hex key")?;
         let signer_address = signer.address();
         let wallet = EthereumWallet::from(signer);
+
+        let submit_url = config.private_rpc_http
+            .as_deref()
+            .unwrap_or(&config.rpc_http);
+        let submit_provider = Arc::new(
+            ProviderBuilder::new()
+                .wallet(wallet.clone())
+                .connect_http(submit_url.parse().wrap_err("Submit RPC URL invalid")?)
+        );
+
         Ok(Self {
             config,
             wallet,
             signer_address,
             nonce: Mutex::new(None),
+            submit_provider,
         })
     }
 
@@ -153,16 +182,7 @@ impl HuntLoanExecutor {
             return (None, None);
         }
 
-        let submit_url = self.config.private_rpc_http
-            .as_deref()
-            .unwrap_or(&self.config.rpc_http);
-        let url = match submit_url.parse() {
-            Ok(u)  => u,
-            Err(e) => { warn!("Parallel shot: invalid RPC URL: {}", e); return (None, None); }
-        };
-        let provider = std::sync::Arc::new(
-            ProviderBuilder::new().wallet(self.wallet.clone()).connect_http(url)
-        );
+        let provider = self.submit_provider.clone();
 
         let nonce = match self.acquire_nonce(provider.as_ref()).await {
             Ok(n)  => n,
@@ -346,14 +366,8 @@ impl HuntLoanExecutor {
         const MAX_ATTEMPTS: u8 = 3;
         const FEE_BUMP_PCT: u128 = 15; // +15% per retry
 
-        // Use private RPC for submission when configured (MEV protection on Base)
-        let submit_url = self.config.private_rpc_http
-            .as_deref()
-            .unwrap_or(&self.config.rpc_http);
-
-        let provider = ProviderBuilder::new()
-            .wallet(self.wallet.clone())
-            .connect_http(submit_url.parse().wrap_err("RPC_URL invalid")?);
+        // Use cached provider (private RPC for MEV protection)
+        let provider = self.submit_provider.clone();
 
         // Micro-bankroll gate: refuse broadcast if wallet is below safety floor.
         // get_balance failure is non-fatal — we log and allow (balance unknown ≠ zero).
@@ -469,15 +483,25 @@ impl HuntLoanExecutor {
     // ── Nonce management ─────────────────────────────────────────────────────
 
     async fn acquire_nonce<P: Provider>(&self, provider: &P) -> Result<u64> {
+        // Fast path: cached nonce available, short lock
+        {
+            let mut guard = self.nonce.lock().await;
+            if let Some(n) = *guard {
+                *guard = Some(n + 1);
+                return Ok(n);
+            }
+        }
+        // Cold path: RPC call outside lock to avoid blocking other tasks
+        let on_chain = provider
+            .get_transaction_count(self.signer_address)
+            .await
+            .wrap_err("get_transaction_count failed")?;
+        // Re-check under lock (another task may have populated it)
         let mut guard = self.nonce.lock().await;
         if let Some(n) = *guard {
             *guard = Some(n + 1);
             return Ok(n);
         }
-        let on_chain = provider
-            .get_transaction_count(self.signer_address)
-            .await
-            .wrap_err("get_transaction_count failed")?;
         *guard = Some(on_chain + 1);
         Ok(on_chain)
     }

@@ -318,7 +318,7 @@ impl HuntLoanEngine {
                 return Ok(());
             }
         };
-        let scan_ms = scan_t.elapsed().as_millis();
+        let scan_us = scan_t.elapsed().as_micros();
 
         if opportunities.is_empty() {
             return Ok(());
@@ -329,7 +329,7 @@ impl HuntLoanEngine {
 
         info!(
             block         = block_num,
-            scan_ms       = scan_ms,
+            scan_us       = scan_us,
             candidates    = candidates.len(),
             opportunities = opportunities.len(),
             "Scan complete"
@@ -345,15 +345,19 @@ impl HuntLoanEngine {
         }
 
         // ── [PHASE 1] Approaching alerts (ETA < 10 min) ──────────────────────
-        {
+        let approaching: Vec<(Address, f64, f64)> = {
             let ve = self.velocity.lock().await;
-            for wc in &warm {
-                if let Some(eta) = ve.eta_minutes(&wc.borrower) && eta > 0.0 && eta < 10.0 {
-                    let addr = format!("{}", wc.borrower);
-                    let hf   = wc.health_factor;
-                    alerts::send_approaching(&addr, hf, eta, 0).await;
-                }
-            }
+            warm.iter().filter_map(|wc| {
+                ve.eta_minutes(&wc.borrower)
+                    .filter(|&eta| eta > 0.0 && eta < 10.0)
+                    .map(|eta| (wc.borrower, wc.health_factor, eta))
+            }).collect()
+        };
+        for (addr, hf, eta) in approaching {
+            let addr_s = addr.to_string();
+            tokio::spawn(async move {
+                alerts::send_approaching(&addr_s, hf, eta, 0).await;
+            });
         }
 
         // ── [PHASE 2] Apply blacklist filter ─────────────────────────────────
@@ -442,7 +446,7 @@ impl HuntLoanEngine {
             }
         }
 
-        let sim_ms = sim_t.elapsed().as_millis();
+        let sim_us = sim_t.elapsed().as_micros();
 
         if profitable.is_empty() {
             return Ok(());
@@ -478,20 +482,25 @@ impl HuntLoanEngine {
             debt_usd       = best_opp.debt_usd,
             net_profit_usd = best_sim.net_profit_usd,
             est_gas        = best_sim.estimated_gas,
-            sim_ms         = sim_ms,
+            sim_us         = sim_us,
             "Best opportunity selected"
         );
 
-        // [PHASE 1] OPPORTUNITY alert — target locked, about to execute
-        alerts::send_opportunity(
-            &format!("{}", best_opp.borrower),
-            best_opp.health_factor,
-            best_opp.debt_usd,
-            &format!("{}", best_opp.collateral_asset),
-            &format!("{}", best_opp.debt_asset),
-            best_sim.net_profit_usd,
-            score(&best_opp),
-        ).await;
+        // [PHASE 1] OPPORTUNITY alert — fire-and-forget off hot path
+        {
+            let borrower_s   = best_opp.borrower.to_string();
+            let collateral_s = best_opp.collateral_asset.to_string();
+            let debt_asset_s = best_opp.debt_asset.to_string();
+            let hf           = best_opp.health_factor;
+            let debt_usd     = best_opp.debt_usd;
+            let net_profit   = best_sim.net_profit_usd;
+            let sc           = score(&best_opp);
+            tokio::spawn(async move {
+                alerts::send_opportunity(
+                    &borrower_s, hf, debt_usd, &collateral_s, &debt_asset_s, net_profit, sc,
+                ).await;
+            });
+        }
 
         // ── Stage 3: EXECUTE ──────────────────────────────────────────────────
         let exec_t = Instant::now();
@@ -505,52 +514,30 @@ impl HuntLoanEngine {
         let bribe_wei = gas::compute_bribe_wei(gross_profit_wei, gas_tier.bribe_fraction);
         let _bribe_eth = bribe_wei as f64 / 1e18;
 
-        // [PHASE 2] Daily budget check
+        // [PHASE 2] Daily budget check — compute outside lock, minimize critical section
+        let today = current_utc_day();
+        let est_gas_cost = (best_sim.estimated_gas as u128).saturating_mul(base_fee_wei);
         {
-            let est_gas_cost = (best_sim.estimated_gas as u128).saturating_mul(base_fee_wei);
             let mut daily = self.daily.lock().await;
 
-            // Midnight reset — compare current UTC day against stored day
-            let today = current_utc_day();
+            // Midnight reset
             if daily.reset_day != today {
-                info!(
-                    old_gas_wei   = daily.gas_wei,
-                    old_bribe_wei = daily.bribe_wei,
-                    new_day       = today,
-                    "Daily budget reset at midnight"
-                );
                 daily.gas_wei   = 0;
                 daily.bribe_wei = 0;
                 daily.reset_day = today;
             }
 
-            if self.config.max_daily_gas_wei < u128::MAX {
-                let projected = daily.gas_wei.saturating_add(est_gas_cost);
-                if projected > self.config.max_daily_gas_wei {
-                    info!(
-                        current_wei  = daily.gas_wei,
-                        projected    = projected,
-                        limit        = self.config.max_daily_gas_wei,
-                        "Daily gas budget cap — skipping execution"
-                    );
-                    return Ok(());
-                }
+            let gas_ok = self.config.max_daily_gas_wei == u128::MAX
+                || daily.gas_wei.saturating_add(est_gas_cost) <= self.config.max_daily_gas_wei;
+            let bribe_ok = self.config.max_daily_bribe_wei == u128::MAX
+                || daily.bribe_wei.saturating_add(bribe_wei) <= self.config.max_daily_bribe_wei;
+
+            if !gas_ok || !bribe_ok {
+                info!("Daily budget cap — skipping execution");
+                return Ok(());
             }
 
-            if self.config.max_daily_bribe_wei < u128::MAX {
-                let projected = daily.bribe_wei.saturating_add(bribe_wei);
-                if projected > self.config.max_daily_bribe_wei {
-                    info!(
-                        current_wei  = daily.bribe_wei,
-                        projected    = projected,
-                        limit        = self.config.max_daily_bribe_wei,
-                        "Daily bribe budget cap — skipping execution"
-                    );
-                    return Ok(());
-                }
-            }
-
-            // Pre-reserve (will be confirmed after receipt or released on failure)
+            // Pre-reserve
             daily.gas_wei   = daily.gas_wei.saturating_add(est_gas_cost);
             daily.bribe_wei = daily.bribe_wei.saturating_add(bribe_wei);
         }
@@ -564,8 +551,13 @@ impl HuntLoanEngine {
                 .execute_parallel(&best_opp, &best_sim, base_fee_wei, regime)
                 .await;
 
-            let exec_ms  = exec_t.elapsed().as_millis();
-            let total_ms = block_start.elapsed().as_millis();
+            let exec_us  = exec_t.elapsed().as_micros();
+            let total_us = block_start.elapsed().as_micros();
+
+            // Pre-format strings once for alert + trade log
+            let borrower_s   = best_opp.borrower.to_string();
+            let collateral_s = best_opp.collateral_asset.to_string();
+            let debt_asset_s = best_opp.debt_asset.to_string();
 
             let mut any_confirmed = false;
             let mut alert_sent    = false;
@@ -592,42 +584,38 @@ impl HuntLoanEngine {
                         tx_hash  = %r.tx_hash,
                         block    = r.block_number,
                         gas_used = r.gas_used,
-                        scan_ms  = scan_ms,
-                        sim_ms   = sim_ms,
-                        exec_ms  = exec_ms,
-                        total_ms = total_ms,
+                        scan_us  = scan_us,
+                        sim_us   = sim_us,
+                        exec_us  = exec_us,
+                        total_us = total_us,
                         "Parallel shot confirmed"
                     );
 
                     // [PHASE 1] EXECUTED alert — only fire once (first confirmed shot)
                     if !alert_sent {
                         alert_sent = true;
-                        let collateral = format!("{}", best_opp.collateral_asset);
-                        let debt_asset = format!("{}", best_opp.debt_asset);
-                        let borrower   = format!("{}", best_opp.borrower);
-                        let tx_hash_s  = format!("{}", r.tx_hash);
-                        let alert_key  = format!("exec-{}", borrower);
+                        let tx_hash_s = r.tx_hash.to_string();
+                        let alert_key = format!("exec-{}", borrower_s);
                         let msg = alerts::fmt_executed(
-                            &borrower, best_opp.health_factor, best_opp.debt_usd,
-                            &collateral, &debt_asset,
+                            &borrower_s, best_opp.health_factor, best_opp.debt_usd,
+                            &collateral_s, &debt_asset_s,
                             best_sim.net_profit_usd, r.gas_used, base_fee_wei,
                             eth_price, &tx_hash_s, r.block_number, 1,
                         );
-                        let _ = alerts::send_telegram(msg, Some(&alert_key), 0).await;
+                        tokio::spawn(async move {
+                            let _ = alerts::send_telegram(msg, Some(&alert_key), 0).await;
+                        });
                     }
 
                     // [PHASE 5] Trade log
-                    let ts = chrono_utc_now();
-                    let target_s     = format!("{}", best_opp.borrower);
-                    let debt_a_s     = format!("{}", best_opp.debt_asset);
-                    let coll_a_s     = format!("{}", best_opp.collateral_asset);
-                    let tx_hash_log  = format!("{}", r.tx_hash);
+                    let ts          = chrono_utc_now();
+                    let tx_hash_log = r.tx_hash.to_string();
                     trades::append_trade(&trades::TradeRecord {
                         timestamp:          &ts,
                         tx_hash:            &tx_hash_log,
-                        target:             &target_s,
-                        debt_asset:         &debt_a_s,
-                        collateral_asset:   &coll_a_s,
+                        target:             &borrower_s,
+                        debt_asset:         &debt_asset_s,
+                        collateral_asset:   &collateral_s,
                         debt_usd:           best_opp.debt_usd,
                         sim_net_profit_usd: best_sim.net_profit_usd,
                         estimated_gas:      best_sim.estimated_gas,
@@ -636,9 +624,9 @@ impl HuntLoanEngine {
                         bribe_wei,
                         block_number:       r.block_number,
                         status:             1,
-                        scan_ms,
-                        sim_ms,
-                        exec_ms,
+                        scan_us,
+                        sim_us,
+                        exec_us,
                     });
                 }
             }
@@ -658,11 +646,11 @@ impl HuntLoanEngine {
                 Ok(result) => {
                     self.consecutive_reverts.store(0, Ordering::Relaxed);
 
-                    let exec_ms  = exec_t.elapsed().as_millis();
-                    let total_ms = block_start.elapsed().as_millis();
+                    let exec_us  = exec_t.elapsed().as_micros();
+                    let total_us = block_start.elapsed().as_micros();
                     let gas_cost_wei = result.gas_used as u128 * base_fee_wei;
 
-                    // Update daily actuals (subtract estimate, add real)
+                    // Update daily actuals
                     {
                         let mut daily = self.daily.lock().await;
                         daily.gas_wei = daily.gas_wei.saturating_add(gas_cost_wei);
@@ -675,45 +663,45 @@ impl HuntLoanEngine {
                     let profit_cents = (best_sim.net_profit_usd.max(0) * 100) as u64;
                     alerts::get_stats().net_profit_cents.fetch_add(profit_cents, Ordering::Relaxed);
 
+                    // Pre-format strings once for alert + trade log
+                    let borrower_s   = best_opp.borrower.to_string();
+                    let collateral_s = best_opp.collateral_asset.to_string();
+                    let debt_asset_s = best_opp.debt_asset.to_string();
+                    let tx_hash_s    = result.tx_hash.to_string();
+
                     info!(
                         tx_hash      = %result.tx_hash,
                         block        = result.block_number,
                         gas_used     = result.gas_used,
-                        scan_ms      = scan_ms,
-                        sim_ms       = sim_ms,
-                        exec_ms      = exec_ms,
-                        total_ms     = total_ms,
+                        scan_us      = scan_us,
+                        sim_us       = sim_us,
+                        exec_us      = exec_us,
+                        total_us     = total_us,
                         "Liquidation complete"
                     );
 
                     // [PHASE 1] EXECUTED alert (confirmed, status=1)
                     {
-                        let collateral = format!("{}", best_opp.collateral_asset);
-                        let debt_asset = format!("{}", best_opp.debt_asset);
-                        let borrower   = format!("{}", best_opp.borrower);
-                        let tx_hash_s  = format!("{}", result.tx_hash);
-                        let alert_key  = format!("exec-{}", borrower);
+                        let alert_key = format!("exec-{}", borrower_s);
                         let msg = alerts::fmt_executed(
-                            &borrower, best_opp.health_factor, best_opp.debt_usd,
-                            &collateral, &debt_asset,
+                            &borrower_s, best_opp.health_factor, best_opp.debt_usd,
+                            &collateral_s, &debt_asset_s,
                             best_sim.net_profit_usd, result.gas_used, base_fee_wei,
                             eth_price, &tx_hash_s, result.block_number, 1,
                         );
-                        let _ = alerts::send_telegram(msg, Some(&alert_key), 0).await;
+                        tokio::spawn(async move {
+                            let _ = alerts::send_telegram(msg, Some(&alert_key), 0).await;
+                        });
                     }
 
                     // [PHASE 5] Trade log
                     let ts = chrono_utc_now();
-                    let target_s    = format!("{}", best_opp.borrower);
-                    let debt_a_s    = format!("{}", best_opp.debt_asset);
-                    let coll_a_s    = format!("{}", best_opp.collateral_asset);
-                    let tx_hash_log = format!("{}", result.tx_hash);
                     trades::append_trade(&trades::TradeRecord {
                         timestamp:          &ts,
-                        tx_hash:            &tx_hash_log,
-                        target:             &target_s,
-                        debt_asset:         &debt_a_s,
-                        collateral_asset:   &coll_a_s,
+                        tx_hash:            &tx_hash_s,
+                        target:             &borrower_s,
+                        debt_asset:         &debt_asset_s,
+                        collateral_asset:   &collateral_s,
                         debt_usd:           best_opp.debt_usd,
                         sim_net_profit_usd: best_sim.net_profit_usd,
                         estimated_gas:      best_sim.estimated_gas,
@@ -722,9 +710,9 @@ impl HuntLoanEngine {
                         bribe_wei,
                         block_number:       result.block_number,
                         status:             1,
-                        scan_ms,
-                        sim_ms,
-                        exec_ms,
+                        scan_us,
+                        sim_us,
+                        exec_us,
                     });
                 }
                 Err(e) => {
