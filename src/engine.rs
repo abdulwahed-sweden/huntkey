@@ -282,7 +282,14 @@ impl HuntLoanEngine {
                 snap_price // cache hit
             } else {
                 let fresh = oracle::fetch_eth_price_usd(provider.as_ref()).await;
-                if fresh > 0 { fresh } else { snap_price } // keep stale on oracle failure
+                if fresh > 0 {
+                    fresh
+                } else if snap_price > 0 && snap_time.elapsed() < Duration::from_secs(300) {
+                    snap_price // stale but within 5-min hard expiry
+                } else {
+                    warn!("ETH price oracle failed and cache expired (>5 min) — zeroing price");
+                    0 // engine safely skips execution when eth_price == 0
+                }
             };
 
             let r = if snap_price > 0 && price > 0 {
@@ -433,13 +440,6 @@ impl HuntLoanEngine {
             match task_result {
                 Ok((opp, Ok(sim))) if sim.passes => {
                     alerts::get_stats().sims_passed.fetch_add(1, Ordering::Relaxed);
-                    // Early exit: if KILL-tier (HF < 1.002) sim passes, execute NOW.
-                    // Abort remaining sims — speed beats completeness for these.
-                    if opp.health_factor < 1.002 {
-                        profitable.push((opp, sim));
-                        join_set.abort_all();
-                        break;
-                    }
                     profitable.push((opp, sim));
                 }
                 Ok((opp, Ok(sim))) => {
