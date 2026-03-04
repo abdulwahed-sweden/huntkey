@@ -101,11 +101,12 @@ WebSocket block header received
 - Returns `SimOutput { passes, estimated_gas, net_profit_usd, revert_reason }`
 
 ### `src/executor.rs` — Transaction broadcast
-- `execute()` — single-shot with up to 3 retries, +15% fee bump per retry
-- `execute_parallel()` — dual-shot (STRIKE + KILL) with adjacent nonces for high-conviction targets
-- EIP-1559 fee computation via `gas::compute_gas_tier()`
-- Private RPC submission when `PRIVATE_RPC_URL` is set
-- Optimistic nonce caching with chain resync on error
+- `execute()` — RBF escalation loop (40% → 60% → 80% → 90% bribe fraction)
+- EIP-1559 profit-proportional fee computation via `gas::compute_profit_aware_fees()`
+- Gas-cost cap enforcement via `config.max_gas_cost_wei`
+- Private RPC submission when `PRIVATE_RPC_URL` is set (MEV protection)
+- Optimistic nonce caching with 10s timeout + chain resync on error
+- Micro-bankroll safety: refuses broadcast below `MIN_WALLET_ETH_WEI` floor
 
 ### `src/reserves.rs` — Aave V3 reserve resolution
 - `ReserveCache::load()` — fetches all Aave V3 reserves at startup
@@ -163,7 +164,7 @@ WebSocket block header received
 
 ## Smart Contract: `HuntLoanFlashReceiver.sol`
 
-**Deployed:** `0x0A0fE1f59D56716aF5c4C9D7688df742EE5949D3` (Base mainnet)
+**Deployed:** `0x60d0C491dF2d35E4C95D98dF37897f908b04b46f` (Base mainnet)
 
 ### Entry Point
 
@@ -208,7 +209,7 @@ If no route returns `>= owed`, reverts with `SwapFailed`.
 
 | Name | Address |
 |---|---|
-| HuntLoanFlashReceiver (active) | `0x0A0fE1f59D56716aF5c4C9D7688df742EE5949D3` |
+| HuntLoanFlashReceiver (active) | `0x60d0C491dF2d35E4C95D98dF37897f908b04b46f` |
 | Aave V3 Pool | `0xA238Dd80C259a72e81d7e4664a9801593F98d1c5` |
 | Aave Data Provider | `0x2d8A3C5677189723C4cB8873CfC9C8976FDF38Ac` |
 | Aave PoolAddressesProvider | `0xe20fCBdBfFC4Dd138cE8b2E6FBb6CB49777ad64D` |

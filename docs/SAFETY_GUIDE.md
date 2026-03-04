@@ -333,7 +333,7 @@ pm2 save
 
 **Check contract profit:**
 ```bash
-cast call 0x0A0fE1f59D56716aF5c4C9D7688df742EE5949D3 \
+cast call 0x60d0C491dF2d35E4C95D98dF37897f908b04b46f \
   "totalProfit()(uint256)" \
   --rpc-url $RPC_URL
 ```
@@ -366,7 +366,7 @@ cast send 0x3011BfD673a9D09f9761203A7fFCca757Af22587 \
 
 | Resource | Link |
 |---|---|
-| HuntLoanFlashReceiver on BaseScan | `https://basescan.org/address/0x0A0fE1f59D56716aF5c4C9D7688df742EE5949D3` |
+| HuntLoanFlashReceiver on BaseScan | `https://basescan.org/address/0x60d0C491dF2d35E4C95D98dF37897f908b04b46f` |
 | Operator wallet on BaseScan | `https://basescan.org/address/0x3011BfD673a9D09f9761203A7fFCca757Af22587` |
 | Aave V3 Base Pool | `https://basescan.org/address/0xA238Dd80C259a72e81d7e4664a9801593F98d1c5` |
 | Architecture doc | `docs/ARCHITECTURE.md` |

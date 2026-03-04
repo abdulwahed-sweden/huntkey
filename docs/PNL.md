@@ -37,7 +37,7 @@ Every confirmed broadcast appends one row. Columns:
 
 ```bash
 # On-chain accumulated profit in the contract:
-cast call 0x0A0fE1f59D56716aF5c4C9D7688df742EE5949D3 \
+cast call 0x60d0C491dF2d35E4C95D98dF37897f908b04b46f \
   "totalProfit()(uint256)" \
   --rpc-url $RPC_URL
 
