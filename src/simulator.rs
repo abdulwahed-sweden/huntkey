@@ -118,7 +118,6 @@ pub async fn simulate_on_chain<P: Provider>(
     // false positives (overestimate) and false negatives (underestimate).
     let sim = math::simulate(
         opp.debt_to_repay,
-        opp.collateral_usd,
         opp.liquidation_bonus_bps, // RISK-01 fixed: per-reserve bonus, not hardcoded 500
         base_fee_wei,
         eth_price_usd,

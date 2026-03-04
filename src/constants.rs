@@ -2,26 +2,32 @@
 //!
 //! Ported from: Bitcoin-Sentinel/eth_forensics/simulation/scripts/monitor_base.js (ADDRS block)
 //! and deployment_flash.json (contract addresses).
-#![allow(dead_code)]
-
 use alloy::primitives::{address, Address};
 
 // ── Chain ──────────────────────────────────────────────────────────────────
+#[allow(dead_code)] // used by contract deployment scripts
 pub const CHAIN_ID: u64 = 8453;
 
 // ── Aave V3 (Base) ─────────────────────────────────────────────────────────
 pub const AAVE_POOL:     Address = address!("A238Dd80C259a72e81d7e4664a9801593F98d1c5");
 pub const AAVE_DATA:     Address = address!("2d8A3C5677189723C4cB8873CfC9C8976FDF38Ac");
+#[allow(dead_code)] // reserved for future on-chain oracle resolution
 pub const AAVE_PROVIDER: Address = address!("e20fCBdBfFC4Dd138cE8b2E6FBb6CB49777ad64D");
 
 // ── DEX Routers (Base) ─────────────────────────────────────────────────────
+#[allow(dead_code)] // reserved for future direct-swap route
 pub const UNISWAP_ROUTER:    Address = address!("2626664c2603336E57B271c5C0b26F421741e481");
+#[allow(dead_code)] // reserved for future quote-before-swap
 pub const UNISWAP_QUOTER_V2: Address = address!("3d4e44Eb1374240CE5F1B871ab261CD16335B76a");
+#[allow(dead_code)] // reserved for future Aerodrome route
 pub const AERODROME_ROUTER:  Address = address!("cF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43");
+#[allow(dead_code)] // reserved for future Aerodrome route
 pub const AERODROME_FACTORY: Address = address!("420DD381b31aEf6683db6B902084cB0FFECe40Da");
 
 // ── Tokens (Base) ─────────────────────────────────────────────────────────
+#[allow(dead_code)] // canonical address; used by contract scripts
 pub const WETH: Address = address!("4200000000000000000000000000000000000006");
+#[allow(dead_code)] // canonical address; used by contract scripts
 pub const USDC: Address = address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
 
 // ── Infrastructure ─────────────────────────────────────────────────────────
@@ -32,18 +38,23 @@ pub const MULTICALL3: Address = address!("cA11bde05977b3631167028862bE2a173976CA
 pub const HUNTLOAN_FLASH_RECEIVER: Address =
     address!("60d0C491dF2d35E4C95D98dF37897f908b04b46f");
 /// Legacy AbdulwahidFlashLiquidator V2 (fallback) — deployed 2026-02-28
+#[allow(dead_code)] // legacy fallback address
 pub const LEGACY_FLASH_LIQUIDATOR: Address =
     address!("E5c3e80C243A6E21883E787013254BeAC829AD1E");
 /// Legacy capital-funded contract (fallback)
+#[allow(dead_code)] // legacy fallback address
 pub const LEGACY_BASE_ALPHA: Address = address!("F8B715bC559032316B56cE41E7fcF7F008a5E093");
 /// Operator wallet
+#[allow(dead_code)] // operator address loaded from env at runtime
 pub const OPERATOR: Address = address!("3011BfD673a9D09f9761203A7fFCca757Af22587");
 
 // ── HF tier thresholds ─────────────────────────────────────────────────────
 /// Ported from CONFIG in monitor_base.js
+#[allow(dead_code)] // reserved for future expanded tier logic
 pub const HF_COLD:     f64 = 1.50;
 pub const HF_WARM:     f64 = 1.15;
 pub const HF_HOT:      f64 = 1.07;
+#[allow(dead_code)] // reserved for future expanded tier logic
 pub const HF_CRITICAL: f64 = 1.04;
 
 // ── Goldilocks debt range (USD, 6-dec USDC units) ─────────────────────────
@@ -71,11 +82,14 @@ pub const BRIBE_STABLE:    f64 = 0.62;
 pub const BRIBE_VOLATILE:  f64 = 0.78;
 pub const BRIBE_CRASH:     f64 = 0.90;
 pub const BRIBE_ULTRA:     f64 = 0.94;  // HF <= 1.005
+#[allow(dead_code)] // absolute ceiling; RBF steps handle escalation
 pub const BRIBE_MAX:       f64 = 0.95;
+#[allow(dead_code)] // superseded by RBF_BRIBE_STEPS escalation
 pub const BRIBE_RETRY_INC: f64 = 0.05;
 
 // ── Execution constants ────────────────────────────────────────────────────
 pub const GAS_LIMIT:   u64 = 800_000;
+#[allow(dead_code)] // superseded by RBF_BRIBE_STEPS length
 pub const MAX_ATTEMPTS: u8 = 6;
 
 // ── RBF escalation ──────────────────────────────────────────────────────
@@ -87,8 +101,11 @@ pub const RBF_WAIT_MS: u64 = 200;
 
 // ── Goldilocks delta-neutral detection — symbol-based classification ───────
 /// ETH-family assets: HF neutral to ETH price when paired with each other
+#[allow(dead_code)] // symbol-based lookup; address-based variant used at runtime
 pub const ETH_FAMILY: &[&str] = &["WETH", "weETH", "wstETH", "cbETH", "rETH", "ezETH", "pxETH"];
+#[allow(dead_code)] // symbol-based lookup; address-based variant used at runtime
 pub const STABLE_FAMILY: &[&str] = &["USDC", "USDT", "DAI", "USDbC", "cUSDbC", "LUSD", "GHO", "EURC", "USDS", "FRAX"];
+#[allow(dead_code)] // symbol-based lookup; address-based variant used at runtime
 pub const BTC_FAMILY: &[&str] = &["cbBTC", "WBTC", "wBTC", "tBTC", "LBTC"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +116,7 @@ pub enum AssetFamily {
     Other,
 }
 
+#[allow(dead_code)] // symbol-based lookup; address-based variant used at runtime
 pub fn asset_family(sym: &str) -> AssetFamily {
     if ETH_FAMILY.contains(&sym)    { return AssetFamily::Eth; }
     if STABLE_FAMILY.contains(&sym) { return AssetFamily::Stable; }
@@ -108,6 +126,7 @@ pub fn asset_family(sym: &str) -> AssetFamily {
 
 /// Returns true when collateral and debt are in the same price family.
 /// "Other" vs anything = not delta-neutral = include the position.
+#[allow(dead_code)] // symbol-based lookup; address-based variant used at runtime
 pub fn is_delta_neutral(coll_sym: &str, debt_sym: &str) -> bool {
     let cf = asset_family(coll_sym);
     let df = asset_family(debt_sym);

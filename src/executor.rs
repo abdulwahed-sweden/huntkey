@@ -206,6 +206,7 @@ impl HuntLoanExecutor {
 
     // ── Broadcast + RBF escalation ──────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     async fn broadcast_with_retry(
         &self,
         opp: &Opportunity,

@@ -295,8 +295,6 @@ impl HuntLoanEngine {
             // Refresh snapshot every ~5 minutes for regime baseline
             if price > 0 && (snap_price == 0 || snap_time.elapsed() >= Duration::from_secs(300)) {
                 *price_guard = (price, Instant::now());
-            } else if price > 0 && snap_price == 0 {
-                *price_guard = (price, Instant::now());
             }
 
             (price, r)
@@ -615,12 +613,20 @@ impl HuntLoanEngine {
                     // [PHASE 1] EXECUTED alert (confirmed, status=1)
                     {
                         let alert_key = format!("exec-{}", borrower_s);
-                        let msg = alerts::fmt_executed(
-                            &borrower_s, best_opp.health_factor, best_opp.debt_usd,
-                            &collateral_s, &debt_asset_s,
-                            best_sim.net_profit_usd, result.gas_used, base_fee_wei,
-                            eth_price, &tx_hash_s, result.block_number, 1,
-                        );
+                        let msg = alerts::fmt_executed(&alerts::ExecutedData {
+                            borrower:       &borrower_s,
+                            hf:             best_opp.health_factor,
+                            debt_usd:       best_opp.debt_usd,
+                            collateral:     &collateral_s,
+                            debt_asset:     &debt_asset_s,
+                            sim_profit_usd: best_sim.net_profit_usd,
+                            gas_used:       result.gas_used,
+                            base_fee_wei,
+                            eth_price_usd:  eth_price,
+                            tx_hash:        &tx_hash_s,
+                            block_num:      result.block_number,
+                            status:         1,
+                        });
                         tokio::spawn(async move {
                             let _ = alerts::send_telegram(msg, Some(&alert_key), 0).await;
                         });

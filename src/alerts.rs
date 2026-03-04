@@ -1,21 +1,21 @@
-/// HuntLoan Telegram alerts — v3 complete rewrite.
-///
-/// Design principles:
-///   - Clear English (no abbreviations like "HF" without context)
-///   - Every icon matches the event meaning
-///   - Smart address shortening (symbols for known tokens, 0xAB…CD for unknown)
-///   - Timestamp on every message
-///   - No raw hex dumps or error bytes — human-readable reasons
-///   - Clean vertical layout optimized for mobile Telegram
-///
-/// Alert classes:
-///   🟢 BOOT          — bot started successfully
-///   💰 LIQUIDATION    — tx confirmed on-chain (profit or loss)
-///   ❌ EXECUTION FAILED — tx failed to send or reverted
-///   🚨 EMERGENCY STOP  — circuit breaker triggered
-///   📊 STATUS REPORT   — periodic operational summary
-///   🎯 TARGET LOCKED   — profitable opportunity found, executing now
-///   ⏳ TARGET APPROACHING — warm position nearing liquidation threshold
+//! HuntLoan Telegram alerts — v3 complete rewrite.
+//!
+//! Design principles:
+//!   - Clear English (no abbreviations like "HF" without context)
+//!   - Every icon matches the event meaning
+//!   - Smart address shortening (symbols for known tokens, 0xAB…CD for unknown)
+//!   - Timestamp on every message
+//!   - No raw hex dumps or error bytes — human-readable reasons
+//!   - Clean vertical layout optimized for mobile Telegram
+//!
+//! Alert classes:
+//!   🟢 BOOT          — bot started successfully
+//!   💰 LIQUIDATION    — tx confirmed on-chain (profit or loss)
+//!   ❌ EXECUTION FAILED — tx failed to send or reverted
+//!   🚨 EMERGENCY STOP  — circuit breaker triggered
+//!   📊 STATUS REPORT   — periodic operational summary
+//!   🎯 TARGET LOCKED   — profitable opportunity found, executing now
+//!   ⏳ TARGET APPROACHING — warm position nearing liquidation threshold
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
@@ -196,10 +196,8 @@ fn throttle_guard(key: &str, limit: Duration) -> bool {
     if limit.is_zero() { return true; }
     let mut guard = ALERT_STATE.lock().unwrap();
     let map = guard.get_or_insert_with(HashMap::new);
-    if let Some(last) = map.get(key) {
-        if last.elapsed() < limit {
-            return false;
-        }
+    if map.get(key).is_some_and(|last| last.elapsed() < limit) {
+        return false;
     }
     map.insert(key.to_string(), Instant::now());
     true
@@ -218,16 +216,14 @@ pub async fn send_telegram(
     let chat_id = std::env::var("TELEGRAM_CHAT_ID").unwrap_or_default();
     if token.is_empty() || chat_id.is_empty() { return Ok(()); }
 
-    if let Some(key) = dedupe_key {
-        if !throttle_guard(key, Duration::from_secs(throttle_secs)) {
-            return Ok(());
-        }
+    if dedupe_key.is_some_and(|key| !throttle_guard(key, Duration::from_secs(throttle_secs))) {
+        return Ok(());
     }
 
     let mut message = text.into();
     if message.len() > 4000 {
         message.truncate(3997);
-        message.push_str("…");
+        message.push('\u{2026}');
     }
 
     let client = Client::new();
@@ -282,28 +278,36 @@ pub fn fmt_boot(mode: &str, contract: &str, operator: &str) -> String {
 //  💰 PROFIT CAUGHT — Transaction confirmed on-chain
 // ═════════════════════════════════════════════════════════════════════════════
 
-pub fn fmt_executed(
-    borrower:       &str,
-    hf:             f64,
-    debt_usd:       u128,
-    collateral:     &str,
-    debt_asset:     &str,
-    sim_profit_usd: i128,
-    gas_used:       u64,
-    base_fee_wei:   u128,
-    eth_price_usd:  u128,
-    tx_hash:        &str,
-    block_num:      u64,
-    status:         u8,
-) -> String {
-    let t = timestamp();
-    let coll = token_name(collateral);
-    let debt = token_name(debt_asset);
-    let gas_eth = gas_used as f64 * base_fee_wei as f64 / 1e18;
-    let gas_usd = gas_eth * eth_price_usd as f64;
-    let tx_link = format!("https://basescan.org/tx/{tx_hash}");
+/// Bundled parameters for `fmt_executed()` — avoids a 12-parameter function signature.
+pub struct ExecutedData<'a> {
+    pub borrower:       &'a str,
+    pub hf:             f64,
+    pub debt_usd:       u128,
+    pub collateral:     &'a str,
+    pub debt_asset:     &'a str,
+    pub sim_profit_usd: i128,
+    pub gas_used:       u64,
+    pub base_fee_wei:   u128,
+    pub eth_price_usd:  u128,
+    pub tx_hash:        &'a str,
+    pub block_num:      u64,
+    pub status:         u8,
+}
 
-    if status == 1 {
+pub fn fmt_executed(d: &ExecutedData<'_>) -> String {
+    let t = timestamp();
+    let coll = token_name(d.collateral);
+    let debt = token_name(d.debt_asset);
+    let gas_eth = d.gas_used as f64 * d.base_fee_wei as f64 / 1e18;
+    let gas_usd = gas_eth * d.eth_price_usd as f64;
+    let tx_hash = d.tx_hash;
+    let tx_link = format!("https://basescan.org/tx/{tx_hash}");
+    let block_num = d.block_num;
+    let sim_profit_usd = d.sim_profit_usd;
+    let debt_usd = d.debt_usd;
+    let hf = d.hf;
+
+    if d.status == 1 {
         format!(
             "💰 <b>PROFIT CAUGHT!</b>\n\
              {LINE}\n\
@@ -316,7 +320,7 @@ pub fn fmt_executed(
              Route: {coll} → {debt}  ·  Debt: ${debt_usd}\n\
              HF: {hf:.4}  ·  Gas: {gas_eth:.5} ETH (${gas_usd:.2})\n\
              🔗 <a href=\"{tx_link}\">BaseScan</a>",
-            short_addr(borrower),
+            short_addr(d.borrower),
         )
     } else {
         format!(
@@ -329,7 +333,7 @@ pub fn fmt_executed(
              TX: <code>{tx_hash}</code>\n\
              \n\
              Borrower: <code>{}</code>  ·  Route: {coll} → {debt}",
-            short_addr(borrower),
+            short_addr(d.borrower),
         )
     }
 }
@@ -378,6 +382,7 @@ pub fn fmt_circuit_breaker(trigger: &str, detail: &str) -> String {
 //  📊 STATUS REPORT — Periodic operational summary
 // ═════════════════════════════════════════════════════════════════════════════
 
+#[allow(clippy::too_many_arguments)]
 pub fn fmt_summary(
     uptime_secs:    u64,
     blocks:         u64,
@@ -630,15 +635,20 @@ mod tests {
 
     #[test]
     fn fmt_executed_shows_profit_caught() {
-        let msg = fmt_executed(
-            "0x1234567890abcdef1234567890abcdef12345678",
-            0.9850, 50_000,
-            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC
-            "0x4200000000000000000000000000000000000006",   // WETH
-            250, 450_000, 5_000_000, 2_500,
-            "0xABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD",
-            12345678, 1,
-        );
+        let msg = fmt_executed(&ExecutedData {
+            borrower:       "0x1234567890abcdef1234567890abcdef12345678",
+            hf:             0.9850,
+            debt_usd:       50_000,
+            collateral:     "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC
+            debt_asset:     "0x4200000000000000000000000000000000000006",   // WETH
+            sim_profit_usd: 250,
+            gas_used:       450_000,
+            base_fee_wei:   5_000_000,
+            eth_price_usd:  2_500,
+            tx_hash:        "0xABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD",
+            block_num:      12345678,
+            status:         1,
+        });
         assert!(msg.contains("PROFIT CAUGHT"), "Should show profit caught: {msg}");
         assert!(msg.contains("USDC → WETH"), "Should show token symbols: {msg}");
         assert!(msg.contains("$250"), "Should show amount");

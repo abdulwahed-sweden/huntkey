@@ -29,7 +29,6 @@ pub struct SimResult {
 /// * `eth_price_usd`       — current ETH price in USD (no decimals)
 pub fn simulate(
     debt_to_repay_usd: u128,
-    _collateral_usd: u128,
     liquidation_bonus_bps: u128,
     gas_price_gwei: u128,
     eth_price_usd: u128,
@@ -98,7 +97,7 @@ mod tests {
     #[test]
     fn test_simulate_profitable() {
         // Repay 10K USDC, 5% bonus, gas 0.005 gwei, ETH $2000
-        let r = simulate(10_000, 10_500, 500, 5_000_000, 2_000);
+        let r = simulate(10_000, 500, 5_000_000, 2_000);
         assert!(r.profitable);
     }
 
@@ -109,14 +108,13 @@ mod tests {
     #[test]
     fn test_bonus_bps_is_not_hardcoded() {
         let debt     = 100_000_u128; // $100K
-        let coll     = 110_000_u128;
         let gas_wei  = 5_000_000_u128;
         let eth_usd  = 2_000_u128;
 
         // Stable asset: 200bps (2%) — e.g. USDC collateral
-        let low  = simulate(debt, coll, 200, gas_wei, eth_usd);
+        let low  = simulate(debt, 200, gas_wei, eth_usd);
         // Volatile asset: 1000bps (10%) — e.g. cbBTC collateral
-        let high = simulate(debt, coll, 1_000, gas_wei, eth_usd);
+        let high = simulate(debt, 1_000, gas_wei, eth_usd);
 
         assert!(
             high.net_profit_usd > low.net_profit_usd,

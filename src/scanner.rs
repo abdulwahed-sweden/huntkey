@@ -82,6 +82,7 @@ pub struct Opportunity {
     pub borrower:             Address,
     pub health_factor:        f64,
     pub debt_usd:             u128,
+    #[allow(dead_code)] // available for future alert enrichment
     pub collateral_usd:       u128,
     /// Resolved on-chain collateral asset address.
     pub collateral_asset:     Address,
@@ -161,7 +162,6 @@ pub async fn scan<P: Provider + Clone + Send + Sync + 'static>(
 
         let sim = math::simulate(
             debt_to_repay,
-            *coll_usd,
             pos.bonus_bps,
             base_fee_wei,
             eth_price_usd,
