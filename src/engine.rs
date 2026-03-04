@@ -176,7 +176,28 @@ impl HuntLoanEngine {
         // [PHASE 1] Summary timer
         let mut last_summary = Instant::now();
 
-        while let Some(block) = block_stream.next().await {
+        let mut shutdown = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to register SIGTERM handler");
+
+        loop {
+        let block = tokio::select! {
+            b = block_stream.next() => match b {
+                Some(b) => b,
+                None => break, // stream ended
+            },
+            _ = tokio::signal::ctrl_c() => {
+                warn!("[HuntLoanEngine] SIGINT received — graceful shutdown");
+                let msg = alerts::fmt_circuit_breaker("SIGINT", "Operator-initiated graceful shutdown");
+                let _ = alerts::send_telegram(msg, None, 0).await;
+                break;
+            }
+            _ = shutdown.recv() => {
+                warn!("[HuntLoanEngine] SIGTERM received — graceful shutdown");
+                let msg = alerts::fmt_circuit_breaker("SIGTERM", "Process manager initiated shutdown");
+                let _ = alerts::send_telegram(msg, None, 0).await;
+                break;
+            }
+        };
             let block_start = Instant::now();
             let block_num   = block.inner.number;
             let base_fee: u128 = block.inner.base_fee_per_gas
@@ -340,7 +361,10 @@ impl HuntLoanEngine {
             }
             Err(e) => {
                 let streak = self.rpc_error_streak.fetch_add(1, Ordering::Relaxed) + 1;
-                warn!(block = block_num, streak = streak, error = %e, "Scan RPC error");
+                // Exponential backoff: 100ms × 2^streak, cap 5s
+                let backoff_ms = (100u64 << streak.min(6)).min(5_000);
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                warn!(block = block_num, streak = streak, backoff_ms = backoff_ms, error = %e, "Scan RPC error");
                 if streak >= self.config.max_rpc_errors as u64 {
                     bail!(
                         "{} — {} consecutive RPC errors (last: {})",
@@ -549,7 +573,15 @@ impl HuntLoanEngine {
                 || daily.bribe_wei.saturating_add(bribe_wei) <= self.config.max_daily_bribe_wei;
 
             if !gas_ok || !bribe_ok {
-                info!("Daily budget cap — skipping execution");
+                warn!(
+                    gas_ok   = gas_ok,
+                    bribe_ok = bribe_ok,
+                    gas_spent_wei  = daily.gas_wei,
+                    bribe_spent_wei = daily.bribe_wei,
+                    est_gas_cost   = est_gas_cost,
+                    est_bribe      = bribe_wei,
+                    "Daily budget cap — skipping execution"
+                );
                 return Ok(());
             }
 

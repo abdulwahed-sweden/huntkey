@@ -51,7 +51,7 @@ pub async fn fetch_borrowers() -> Result<Vec<Address>> {
     let mut cursor = String::new(); // id_gt cursor — empty = start from beginning
 
     loop {
-        let page = match fetch_page(&client, &cursor).await {
+        let page = match fetch_page_with_retry(&client, &cursor).await {
             Ok(p)  => p,
             Err(e) => {
                 warn!("[discovery] Subgraph page error (cursor={:?}): {}", cursor, e);
@@ -119,6 +119,27 @@ pub async fn refresh_watchlist(path: &str) -> Result<()> {
 }
 
 // ── Internal ──────────────────────────────────────────────────────────────────
+
+/// Fetch a page with retry on 429 rate-limit (exponential backoff: 2s, 4s, 8s).
+async fn fetch_page_with_retry(client: &reqwest::Client, cursor: &str) -> Result<Vec<Address>> {
+    const MAX_RETRIES: u32 = 3;
+    for attempt in 0..=MAX_RETRIES {
+        match fetch_page(client, cursor).await {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < MAX_RETRIES && e.to_string().contains("429") => {
+                let backoff = std::time::Duration::from_secs(2u64 << attempt); // 2s, 4s, 8s
+                warn!(
+                    attempt = attempt + 1,
+                    backoff_secs = backoff.as_secs(),
+                    "[discovery] 429 rate limit — retrying"
+                );
+                tokio::time::sleep(backoff).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
 
 async fn fetch_page(client: &reqwest::Client, cursor: &str) -> Result<Vec<Address>> {
     let id_filter = if cursor.is_empty() {
