@@ -157,12 +157,12 @@ impl AlertStats {
     pub fn record_revert(&self, reason: &str) {
         let explained = explain_error(reason);
         let key: String = explained.chars().take(100).collect();
-        let mut map = self.revert_reasons.lock().unwrap();
+        let mut map = self.revert_reasons.lock().unwrap_or_else(|e| e.into_inner());
         *map.entry(key).or_insert(0) += 1;
     }
 
     pub fn top_reverts(&self, n: usize) -> Vec<(String, u64)> {
-        let map = self.revert_reasons.lock().unwrap();
+        let map = self.revert_reasons.lock().unwrap_or_else(|e| e.into_inner());
         let mut v: Vec<_> = map.iter().map(|(k, &c)| (k.clone(), c)).collect();
         v.sort_by(|a, b| b.1.cmp(&a.1));
         v.truncate(n);
@@ -194,7 +194,7 @@ static ALERT_STATE: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 
 fn throttle_guard(key: &str, limit: Duration) -> bool {
     if limit.is_zero() { return true; }
-    let mut guard = ALERT_STATE.lock().unwrap();
+    let mut guard = ALERT_STATE.lock().unwrap_or_else(|e| e.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
     if map.get(key).is_some_and(|last| last.elapsed() < limit) {
         return false;
