@@ -60,12 +60,43 @@ async fn main() -> Result<()> {
         "Config loaded"
     );
 
+    // ── Address validation ────────────────────────────────────────────────
     if config.huntloan_addr == Address::ZERO {
+        if !config.dry_run {
+            return Err(eyre::eyre!(
+                "HUNTLOAN_CONTRACT is Address::ZERO — refusing to start in {} mode. \
+                 Deploy HuntLoanFlashReceiver.sol and set HUNTLOAN_CONTRACT in .env",
+                if config.soft_live { "SOFT_LIVE" } else { "LIVE" }
+            ));
+        }
         tracing::warn!(
-            "HUNTLOAN_CONTRACT is not set — simulation will revert. \
+            "HUNTLOAN_CONTRACT is not set — simulations will revert. \
              Deploy HuntLoanFlashReceiver.sol and set HUNTLOAN_CONTRACT in .env"
         );
     }
+
+    if config.huntloan_addr != Address::ZERO
+        && config.huntloan_addr != constants::HUNTLOAN_FLASH_RECEIVER
+    {
+        tracing::warn!(
+            config   = %config.huntloan_addr,
+            expected = %constants::HUNTLOAN_FLASH_RECEIVER,
+            "HUNTLOAN_CONTRACT differs from constants::HUNTLOAN_FLASH_RECEIVER — \
+             verify this is intentional (new deployment?)"
+        );
+    }
+
+    info!(
+        huntloan_contract  = %config.huntloan_addr,
+        aave_pool          = %config.aave_pool,
+        operator           = %config.operator_addr,
+        chain_id           = config.chain_id,
+        max_bribe_wei      = config.max_bribe_wei,
+        max_bribe_fraction = config.max_bribe_fraction,
+        min_profit_usd     = config.min_profit_usd,
+        min_wallet_eth_wei = config.min_wallet_eth_wei,
+        "Active config"
+    );
 
     // ── Boot alert ───────────────────────────────────────────────────────────
     {

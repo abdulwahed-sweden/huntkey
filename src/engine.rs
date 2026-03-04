@@ -31,7 +31,7 @@ use tracing::{error, info, warn};
 use crate::{
     alerts,
     config::Config,
-    constants::{self, PARALLEL_CONVICTION_USD},
+    constants,
     discovery,
     executor::HuntLoanExecutor,
     gas,
@@ -97,6 +97,8 @@ pub struct HuntLoanEngine {
     last_eth_price: Mutex<(u128, Instant)>,
     /// Watchlist candidates cached in memory — refreshed by background discovery task.
     candidates: Arc<Mutex<Vec<Address>>>,
+    /// Crash-mode hotset: positions near liquidation, updated each block from velocity + warm scan.
+    hotset: Mutex<Vec<Address>>,
 }
 
 impl HuntLoanEngine {
@@ -114,6 +116,7 @@ impl HuntLoanEngine {
             daily:          Mutex::new(DailyBudget { gas_wei: 0, bribe_wei: 0, reset_day: 0 }),
             last_eth_price: Mutex::new((0, Instant::now())),
             candidates:     Arc::new(Mutex::new(Vec::new())),
+            hotset:         Mutex::new(Vec::new()),
         })
     }
 
@@ -264,30 +267,47 @@ impl HuntLoanEngine {
         block_start: Instant,
         reserve_cache: &ReserveCache,
     ) -> Result<()> {
-        let eth_price = oracle::fetch_eth_price_usd(provider.as_ref()).await;
-
-        // ── Regime detection (5-min ETH price window) ─────────────────────────
-        let regime = {
+        // ETH price cache (30s TTL) — saves 50-100ms RPC on most blocks
+        let (eth_price, regime) = {
             let mut price_guard = self.last_eth_price.lock().await;
             let (snap_price, snap_time) = *price_guard;
-            let r = if snap_price > 0 && eth_price > 0 {
-                let pct = (eth_price as f64 - snap_price as f64) / snap_price as f64;
+
+            let price = if snap_price > 0 && snap_time.elapsed() < Duration::from_secs(30) {
+                snap_price // cache hit
+            } else {
+                let fresh = oracle::fetch_eth_price_usd(provider.as_ref()).await;
+                if fresh > 0 { fresh } else { snap_price } // keep stale on oracle failure
+            };
+
+            let r = if snap_price > 0 && price > 0 {
+                let pct = (price as f64 - snap_price as f64) / snap_price as f64;
                 gas::detect_regime(pct)
             } else {
                 gas::Regime::Stable
             };
-            // Refresh snapshot every ~5 minutes (skip on oracle failure)
-            if eth_price > 0 && (snap_price == 0 || snap_time.elapsed() >= Duration::from_secs(300)) {
-                *price_guard = (eth_price, Instant::now());
+
+            // Refresh snapshot every ~5 minutes for regime baseline
+            if price > 0 && (snap_price == 0 || snap_time.elapsed() >= Duration::from_secs(300)) {
+                *price_guard = (price, Instant::now());
+            } else if price > 0 && snap_price == 0 {
+                *price_guard = (price, Instant::now());
             }
-            r
+
+            (price, r)
         };
 
         // ── Stage 1: SCAN ─────────────────────────────────────────────────────
         let scan_t   = Instant::now();
-        let candidates = {
-            let guard = self.candidates.lock().await;
-            guard.clone()
+        let candidates = if regime == gas::Regime::Crash {
+            let hs = self.hotset.lock().await;
+            if hs.is_empty() {
+                self.candidates.lock().await.clone() // fallback to full watchlist
+            } else {
+                info!(hotset_size = hs.len(), "CRASH MODE — scanning hotset only");
+                hs.clone()
+            }
+        } else {
+            self.candidates.lock().await.clone()
         };
         if candidates.is_empty() {
             return Ok(());
@@ -335,29 +355,10 @@ impl HuntLoanEngine {
             "Scan complete"
         );
 
-        // ── Warm-zone scan → velocity engine ─────────────────────────────────
-        let warm = scanner::scan_warm(provider.as_ref(), &self.config, &candidates).await;
+        // Record opportunity HFs into velocity engine immediately (cheap, no RPC)
         {
             let mut ve = self.velocity.lock().await;
-            for wc in &warm   { ve.record(wc.borrower, wc.health_factor); }
             for opp in &opportunities { ve.record(opp.borrower, opp.health_factor); }
-            ve.maybe_gc();
-        }
-
-        // ── [PHASE 1] Approaching alerts (ETA < 10 min) ──────────────────────
-        let approaching: Vec<(Address, f64, f64)> = {
-            let ve = self.velocity.lock().await;
-            warm.iter().filter_map(|wc| {
-                ve.eta_minutes(&wc.borrower)
-                    .filter(|&eta| eta > 0.0 && eta < 10.0)
-                    .map(|eta| (wc.borrower, wc.health_factor, eta))
-            }).collect()
-        };
-        for (addr, hf, eta) in approaching {
-            let addr_s = addr.to_string();
-            tokio::spawn(async move {
-                alerts::send_approaching(&addr_s, hf, eta, 0).await;
-            });
         }
 
         // ── [PHASE 2] Apply blacklist filter ─────────────────────────────────
@@ -419,12 +420,22 @@ impl HuntLoanEngine {
             });
         }
 
+        // Pre-warm nonce while sims run — saves ~20-30ms from execution path
+        self.executor.prefetch_nonce().await;
+
         let mut profitable: Vec<(Opportunity, simulator::SimOutput)> = Vec::new();
 
         while let Some(task_result) = join_set.join_next().await {
             match task_result {
                 Ok((opp, Ok(sim))) if sim.passes => {
                     alerts::get_stats().sims_passed.fetch_add(1, Ordering::Relaxed);
+                    // Early exit: if KILL-tier (HF < 1.002) sim passes, execute NOW.
+                    // Abort remaining sims — speed beats completeness for these.
+                    if opp.health_factor < 1.002 {
+                        profitable.push((opp, sim));
+                        join_set.abort_all();
+                        break;
+                    }
                     profitable.push((opp, sim));
                 }
                 Ok((opp, Ok(sim))) => {
@@ -545,104 +556,19 @@ impl HuntLoanEngine {
         // Record execution attempt
         alerts::get_stats().execs_attempted.fetch_add(1, Ordering::Relaxed);
 
-        if best_sim.net_profit_usd >= PARALLEL_CONVICTION_USD as i128 {
-            // High-conviction: dual-shot (STRIKE + KILL) in parallel
-            let (r1, r2) = self.executor
-                .execute_parallel(&best_opp, &best_sim, base_fee_wei, regime)
-                .await;
+        // Single-shot execution with profit-proportional priority fee
+        info!(
+            tier               = ?gas_tier_sel,
+            regime             = ?regime,
+            gross_profit_wei   = gross_profit_wei,
+            bribe_wei          = bribe_wei,
+            max_bribe_fraction = self.config.max_bribe_fraction,
+            "Profit-proportional bribe active"
+        );
 
-            let exec_us  = exec_t.elapsed().as_micros();
-            let total_us = block_start.elapsed().as_micros();
-
-            // Pre-format strings once for alert + trade log
-            let borrower_s   = best_opp.borrower.to_string();
-            let collateral_s = best_opp.collateral_asset.to_string();
-            let debt_asset_s = best_opp.debt_asset.to_string();
-
-            let mut any_confirmed = false;
-            let mut alert_sent    = false;
-            for (shot, result) in [("STRIKE", r1), ("KILL", r2)] {
-                if let Some(r) = result {
-                    any_confirmed = true;
-                    let gas_cost_wei = r.gas_used as u128 * base_fee_wei;
-
-                    // Update daily actuals
-                    {
-                        let mut daily = self.daily.lock().await;
-                        daily.gas_wei = daily.gas_wei.saturating_add(gas_cost_wei);
-                    }
-
-                    // Update session stats
-                    alerts::get_stats().execs_succeeded.fetch_add(1, Ordering::Relaxed);
-                    let gas_gwei = (gas_cost_wei / 1_000_000_000) as u64;
-                    alerts::get_stats().gas_cost_gwei.fetch_add(gas_gwei, Ordering::Relaxed);
-                    let profit_cents = (best_sim.net_profit_usd.max(0) * 100) as u64;
-                    alerts::get_stats().net_profit_cents.fetch_add(profit_cents, Ordering::Relaxed);
-
-                    info!(
-                        shot     = shot,
-                        tx_hash  = %r.tx_hash,
-                        block    = r.block_number,
-                        gas_used = r.gas_used,
-                        scan_us  = scan_us,
-                        sim_us   = sim_us,
-                        exec_us  = exec_us,
-                        total_us = total_us,
-                        "Parallel shot confirmed"
-                    );
-
-                    // [PHASE 1] EXECUTED alert — only fire once (first confirmed shot)
-                    if !alert_sent {
-                        alert_sent = true;
-                        let tx_hash_s = r.tx_hash.to_string();
-                        let alert_key = format!("exec-{}", borrower_s);
-                        let msg = alerts::fmt_executed(
-                            &borrower_s, best_opp.health_factor, best_opp.debt_usd,
-                            &collateral_s, &debt_asset_s,
-                            best_sim.net_profit_usd, r.gas_used, base_fee_wei,
-                            eth_price, &tx_hash_s, r.block_number, 1,
-                        );
-                        tokio::spawn(async move {
-                            let _ = alerts::send_telegram(msg, Some(&alert_key), 0).await;
-                        });
-                    }
-
-                    // [PHASE 5] Trade log
-                    let ts          = chrono_utc_now();
-                    let tx_hash_log = r.tx_hash.to_string();
-                    trades::append_trade(&trades::TradeRecord {
-                        timestamp:          &ts,
-                        tx_hash:            &tx_hash_log,
-                        target:             &borrower_s,
-                        debt_asset:         &debt_asset_s,
-                        collateral_asset:   &collateral_s,
-                        debt_usd:           best_opp.debt_usd,
-                        sim_net_profit_usd: best_sim.net_profit_usd,
-                        estimated_gas:      best_sim.estimated_gas,
-                        gas_used:           r.gas_used,
-                        base_fee_wei,
-                        bribe_wei,
-                        block_number:       r.block_number,
-                        status:             1,
-                        scan_us,
-                        sim_us,
-                        exec_us,
-                    });
-                }
-            }
-
-            if any_confirmed {
-                self.consecutive_reverts.store(0, Ordering::Relaxed);
-            } else {
-                let n = self.consecutive_reverts.fetch_add(1, Ordering::Relaxed) + 1;
-                warn!(count = n, "Parallel dual-shot: both shots returned no receipt");
-                if n >= self.config.max_consecutive_reverts as u64 {
-                    bail!("{} — {} consecutive execution failures", CIRCUIT_BREAKER, n);
-                }
-            }
-        } else {
-            // Standard single-shot
-            match self.executor.execute(&best_opp, &best_sim, base_fee_wei, regime).await {
+        match self.executor.execute(
+            &best_opp, &best_sim, base_fee_wei, regime, gross_profit_wei,
+        ).await {
                 Ok(result) => {
                     self.consecutive_reverts.store(0, Ordering::Relaxed);
 
@@ -763,6 +689,45 @@ impl HuntLoanEngine {
                         );
                     }
                 }
+            }
+
+        // ── Deferred: warm-zone scan + velocity + approaching alerts ─────────
+        // Moved AFTER execution to shave ~30-50ms from the critical path.
+        // In crash mode we skip the warm scan entirely — hotset was populated on previous block.
+        if regime != gas::Regime::Crash {
+            let all_candidates = self.candidates.lock().await.clone();
+            let warm = scanner::scan_warm(provider.as_ref(), &self.config, &all_candidates).await;
+            let mut ve = self.velocity.lock().await;
+            for wc in &warm { ve.record(wc.borrower, wc.health_factor); }
+            ve.maybe_gc();
+
+            // Collect velocity-hot addresses for hotset
+            let vel_hot_addrs = ve.addresses_below_hf(constants::HF_HOT);
+
+            let approaching: Vec<(Address, f64, f64)> = warm.iter().filter_map(|wc| {
+                ve.eta_minutes(&wc.borrower)
+                    .filter(|&eta| eta > 0.0 && eta < 10.0)
+                    .map(|eta| (wc.borrower, wc.health_factor, eta))
+            }).collect();
+            drop(ve); // release lock before spawning
+
+            // Build hotset: warm-scan addresses below HF_HOT + velocity-hot addresses
+            let mut new_hotset: Vec<Address> = warm.iter()
+                .filter(|wc| wc.health_factor > 0.0 && wc.health_factor < constants::HF_HOT)
+                .map(|wc| wc.borrower)
+                .collect();
+            for addr in vel_hot_addrs {
+                if !new_hotset.contains(&addr) {
+                    new_hotset.push(addr);
+                }
+            }
+            *self.hotset.lock().await = new_hotset;
+
+            for (addr, hf, eta) in approaching {
+                let addr_s = addr.to_string();
+                tokio::spawn(async move {
+                    alerts::send_approaching(&addr_s, hf, eta, 0).await;
+                });
             }
         }
 

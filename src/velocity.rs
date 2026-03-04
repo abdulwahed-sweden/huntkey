@@ -118,6 +118,20 @@ impl VelocityEngine {
         self.history.get(addr).map(|v| v.len()).unwrap_or(0)
     }
 
+    /// Return addresses whose latest observed HF is below `hf_threshold`.
+    ///
+    /// Used by the crash-mode hotset: positions close to liquidation are pre-loaded
+    /// so the scanner can skip the full watchlist and hit only these hot targets.
+    pub fn addresses_below_hf(&self, hf_threshold: f64) -> Vec<Address> {
+        self.history.iter()
+            .filter_map(|(addr, obs)| {
+                obs.last()
+                    .filter(|o| o.hf > 0.0 && o.hf < hf_threshold)
+                    .map(|_| *addr)
+            })
+            .collect()
+    }
+
     /// Periodically purge addresses with all-stale observations.
     ///
     /// Call once per block — no-ops if < GC_INTERVAL_SECS elapsed.
@@ -173,6 +187,28 @@ mod tests {
         }
         // Slope is positive → returns None
         assert!(ve.eta_minutes(&a).is_none());
+    }
+
+    #[test]
+    fn addresses_below_hf_returns_hot_only() {
+        let mut ve = VelocityEngine::new();
+        let hot  = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let warm = address!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        let cold = address!("cccccccccccccccccccccccccccccccccccccccc");
+
+        ve.record(hot,  1.03); // below HF_HOT (1.07)
+        ve.record(warm, 1.10); // above HF_HOT
+        ve.record(cold, 1.50); // well above
+
+        let result = ve.addresses_below_hf(1.07);
+        assert_eq!(result.len(), 1, "Only the hot address should be returned");
+        assert_eq!(result[0], hot);
+
+        // Zero HF should be excluded (invalid observation)
+        let zero = address!("dddddddddddddddddddddddddddddddddddddddd");
+        ve.record(zero, 0.0);
+        let result2 = ve.addresses_below_hf(1.07);
+        assert_eq!(result2.len(), 1, "Zero-HF address should be excluded");
     }
 
     #[test]

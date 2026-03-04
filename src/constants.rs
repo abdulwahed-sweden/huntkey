@@ -49,13 +49,17 @@ pub const HF_CRITICAL: f64 = 1.04;
 // ── Goldilocks debt range (USD, 6-dec USDC units) ─────────────────────────
 pub const GOLDILOCKS_MIN_DEBT_USD: u64 = 5_000;
 pub const GOLDILOCKS_MAX_DEBT_USD: u64 = 500_000;
-pub const PARALLEL_CONVICTION_USD: u64 = 15_000;
 
 // ── Gas caps (in wei) ──────────────────────────────────────────────────────
 /// 0.008 ETH — hard ceiling on per-tx gas cost
 pub const MAX_GAS_COST_WEI: u128 = 8_000_000_000_000_000; // 0.008 ETH
-/// 0.05 ETH — hard ceiling on sequencer bribe
-pub const MAX_BRIBE_WEI: u128 = 50_000_000_000_000_000;   // 0.05 ETH
+/// 2 ETH -- absolute safety ceiling on sequencer bribe (configurable via MAX_BRIBE_WEI env).
+/// This is a catastrophe guard, NOT the economic limit. The profit-fraction cap
+/// (DEFAULT_MAX_BRIBE_FRACTION) is the real limiter in normal operation.
+pub const MAX_BRIBE_WEI: u128 = 2_000_000_000_000_000_000; // 2 ETH
+/// Maximum fraction of gross profit payable as priority fee bribe.
+/// Default 0.90 = willing to pay up to 90% of gross profit for inclusion.
+pub const DEFAULT_MAX_BRIBE_FRACTION: f64 = 0.90;
 /// Minimum net profit before firing
 pub const MIN_NET_PROFIT_USD: f64 = 10.0;
 /// Safety floor: skip execution if wallet balance is below this
@@ -73,6 +77,13 @@ pub const BRIBE_RETRY_INC: f64 = 0.05;
 // ── Execution constants ────────────────────────────────────────────────────
 pub const GAS_LIMIT:   u64 = 800_000;
 pub const MAX_ATTEMPTS: u8 = 6;
+
+// ── RBF escalation ──────────────────────────────────────────────────────
+/// Bribe-fraction steps for Replace-By-Fee escalation loop.
+/// Final attempt uses `config.max_bribe_fraction` (0.90), giving 4 total: 40% → 60% → 80% → 90%.
+pub const RBF_BRIBE_STEPS: &[f64] = &[0.40, 0.60, 0.80];
+/// Wait between RBF attempts before escalating (ms).
+pub const RBF_WAIT_MS: u64 = 200;
 
 // ── Goldilocks delta-neutral detection — symbol-based classification ───────
 /// ETH-family assets: HF neutral to ETH price when paired with each other

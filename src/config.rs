@@ -9,6 +9,8 @@ use alloy::primitives::{address, Address};
 use alloy::signers::local::PrivateKeySigner;
 use eyre::{Result, WrapErr};
 
+use crate::constants;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     // [NETWORK]
@@ -38,10 +40,11 @@ pub struct Config {
     /// Sign + print full tx preview, do NOT broadcast. Requires DRY_RUN=false.
     pub soft_live:        bool,       // SOFT_LIVE — preview mode
     pub min_profit_usd:   f64,        // MIN_PROFIT_USD
-    #[allow(dead_code)]
     pub max_gas_cost_wei: u128,       // MAX_GAS_COST_WEI
-    #[allow(dead_code)]
     pub max_bribe_wei:    u128,       // MAX_BRIBE_WEI
+    /// Maximum fraction of gross profit payable as priority fee bribe.
+    /// Default: 0.90 (90%). Set MAX_BRIBE_FRACTION=0.75 to be more conservative.
+    pub max_bribe_fraction: f64,      // MAX_BRIBE_FRACTION
 
     // [CIRCUIT BREAKER]
     /// Engine stops after this many consecutive execution reverts. Default: 3.
@@ -149,7 +152,12 @@ impl Config {
         let max_bribe_wei = std::env::var("MAX_BRIBE_WEI")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(50_000_000_000_000_000_u128); // 0.05 ETH
+            .unwrap_or(2_000_000_000_000_000_000_u128); // 2 ETH safety ceiling
+
+        let max_bribe_fraction = std::env::var("MAX_BRIBE_FRACTION")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(constants::DEFAULT_MAX_BRIBE_FRACTION); // 0.90
 
         let max_consecutive_reverts = std::env::var("MAX_CONSECUTIVE_REVERTS")
             .ok()
@@ -227,6 +235,7 @@ impl Config {
             min_profit_usd,
             max_gas_cost_wei,
             max_bribe_wei,
+            max_bribe_fraction,
             max_consecutive_reverts,
             max_rpc_errors,
             alert_rate_limit_secs,
