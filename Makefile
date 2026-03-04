@@ -42,7 +42,7 @@ live-controlled:
 	DRY_RUN=false \
 	SOFT_LIVE=false \
 	MAX_GAS_COST_WEI=2000000000000000 \
-	MAX_BRIBE_WEI=5000000000000000 \
+	MAX_BRIBE_WEI=500000000000000000 \
 	MIN_PROFIT_USD=20 \
 	RUST_LOG=huntloan=info \
 	cargo run --release

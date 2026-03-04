@@ -214,7 +214,7 @@ INFO Liquidation complete tx_hash=0x... total_ms=...
 | `AAVE_POOL` | No | hardcoded | Override Aave V3 Pool address |
 | `AAVE_ADDRESSES_PROVIDER` | No | hardcoded | Override PoolAddressesProvider |
 | `MAX_GAS_COST_WEI` | No | `8000000000000000` | Hard cap on gas cost per tx (0.008 ETH) |
-| `MAX_BRIBE_WEI` | No | `50000000000000000` | Hard cap on sequencer bribe (0.05 ETH) |
+| `MAX_BRIBE_WEI` | No | `500000000000000000` | Operational cap on sequencer bribe (0.5 ETH) |
 | `PRIVATE_RPC_URL` | No | same as RPC_URL | Private RPC for MEV-protected tx submission |
 | `TELEGRAM_BOT_TOKEN` | No | — | Telegram bot token for alerts |
 | `TELEGRAM_CHAT_ID` | No | — | Telegram chat ID to send alerts |
@@ -237,7 +237,7 @@ INFO Liquidation complete tx_hash=0x... total_ms=...
 | Parameter | Cap | Env override |
 |---|---|---|
 | Gas cost per tx | 0.008 ETH | `MAX_GAS_COST_WEI` |
-| Sequencer bribe | 0.05 ETH | `MAX_BRIBE_WEI` |
+| Sequencer bribe | 0.5 ETH | `MAX_BRIBE_WEI` |
 | Minimum net profit | $10 USD | `MIN_PROFIT_USD` |
 | Minimum wallet ETH | 0.005 ETH | `MIN_WALLET_ETH` (constants) |
 
@@ -262,7 +262,7 @@ MIN_MARGIN_BPS=100                     # require 1% margin minimum
 To tighten per-tx caps:
 ```bash
 MAX_GAS_COST_WEI=4000000000000000   # 0.004 ETH (tighter)
-MAX_BRIBE_WEI=25000000000000000     # 0.025 ETH (tighter)
+MAX_BRIBE_WEI=100000000000000000    # 0.1 ETH (tighter)
 ```
 
 ---

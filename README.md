@@ -163,7 +163,7 @@ DRY_RUN=true                # true = simulate only, false = live execution
 WATCHLIST_PATH=watchlist.json
 MIN_PROFIT_USD=10           # Minimum net profit (USD) to attempt liquidation
 MAX_GAS_COST_WEI=8000000000000000   # Max gas cost per tx (wei)
-MAX_BRIBE_WEI=50000000000000000     # Max priority fee for MEV protection
+MAX_BRIBE_WEI=500000000000000000    # Max sequencer bribe (0.5 ETH)
 
 # Logging
 RUST_LOG=huntloan=info      # Tracing filter

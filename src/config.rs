@@ -152,7 +152,7 @@ impl Config {
         let max_bribe_wei = std::env::var("MAX_BRIBE_WEI")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(2_000_000_000_000_000_000_u128); // 2 ETH safety ceiling
+            .unwrap_or(500_000_000_000_000_000_u128); // 0.5 ETH operational default
 
         let max_bribe_fraction = std::env::var("MAX_BRIBE_FRACTION")
             .ok()
