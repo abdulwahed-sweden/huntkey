@@ -223,11 +223,12 @@ impl HuntLoanExecutor {
         let provider = self.submit_provider.clone();
 
         // Micro-bankroll gate: refuse broadcast if wallet is below safety floor.
+        // Bail on RPC failure instead of silently bypassing the safety check.
         let balance_wei = provider
             .get_balance(self.signer_address)
             .await
             .map(|b| b.to::<u128>())
-            .unwrap_or(u128::MAX);
+            .wrap_err("Balance check RPC failed")?;
         if balance_wei < self.config.min_wallet_eth_wei {
             let bal_eth = balance_wei as f64 / 1e18;
             // Fire low-balance Telegram alert (throttled to 1/hr inside)
@@ -246,7 +247,12 @@ impl HuntLoanExecutor {
         steps.push(self.config.max_bribe_fraction);
         let num_steps = steps.len();
 
-        let nonce = self.acquire_nonce(&provider).await?;
+        let nonce = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.acquire_nonce(&provider),
+        )
+        .await
+        .wrap_err("Nonce acquisition timed out after 10s")??;
 
         let gas_limit = if est_gas > 0 {
             ((est_gas as u128 * 120 / 100).max(800_000)) as u64
@@ -442,6 +448,7 @@ impl HuntLoanExecutor {
     }
 
     async fn invalidate_nonce(&self) {
+        warn!("Nonce cache invalidated — will re-fetch from chain on next tx");
         *self.nonce.lock().await = None;
     }
 }
