@@ -663,12 +663,12 @@ mod tests {
     fn fmt_boot_is_clean() {
         let msg = fmt_boot(
             "DRY_RUN",
-            "0x0A0fE1f59D56716aF5c4C9D7688df742EE5949D3",
+            "0x60d0C491dF2d35E4C95D98dF37897f908b04b46f",
             "0x3011BfD673a9D09f9761203A7fFCca757Af22587",
         );
         assert!(msg.contains("Bot Online"));
         assert!(msg.contains("DRY_RUN"));
-        assert!(msg.contains("0x0A0f…49D3"));  // shortened
+        assert!(msg.contains("0x60d0…b46f"));  // shortened
         assert!(msg.contains("Base Mainnet"));
     }
 
