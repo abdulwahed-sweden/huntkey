@@ -95,6 +95,7 @@ pub struct Opportunity {
     pub debt_to_repay_raw:    u128,
     /// Actual liquidation bonus from Aave reserve config (bps, e.g. 500 = 5%).
     pub liquidation_bonus_bps: u128,
+    #[allow(dead_code)] // available for future logging/alert enrichment
     pub estimated_profit_usd: i128,
 }
 
@@ -197,8 +198,6 @@ pub async fn scan<P: Provider + Clone + Send + Sync + 'static>(
         });
     }
 
-    // Sort by profit descending
-    opportunities.sort_by(|a, b| b.estimated_profit_usd.cmp(&a.estimated_profit_usd));
     Ok(opportunities)
 }
 

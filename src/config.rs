@@ -40,7 +40,6 @@ pub struct Config {
     /// Sign + print full tx preview, do NOT broadcast. Requires DRY_RUN=false.
     pub soft_live:        bool,       // SOFT_LIVE — preview mode
     pub min_profit_usd:   f64,        // MIN_PROFIT_USD
-    #[allow(dead_code)] // wired into executor gas-cost cap in a later commit
     pub max_gas_cost_wei: u128,       // MAX_GAS_COST_WEI
     pub max_bribe_wei:    u128,       // MAX_BRIBE_WEI
     /// Maximum fraction of gross profit payable as priority fee bribe.

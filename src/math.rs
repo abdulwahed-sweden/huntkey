@@ -42,7 +42,7 @@ pub fn simulate(
 
     // Gas cost: ~800K gas on Base L2
     // gas_price_gwei is passed in wei (e.g. 5_000_000 = 0.005 gwei = 5M wei)
-    let gas_units: u128 = 800_000;
+    let gas_units: u128 = crate::constants::GAS_LIMIT as u128;
     let gas_eth_wei: u128 = gas_units * gas_price_gwei; // already in wei
     let gas_cost_usd: u128 = gas_eth_wei * eth_price_usd / 1_000_000_000_000_000_000u128;
 

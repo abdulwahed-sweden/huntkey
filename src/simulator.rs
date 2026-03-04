@@ -109,7 +109,7 @@ pub async fn simulate_on_chain<P: Provider>(
         .from(config.operator_addr)
         .estimate_gas()
         .await
-        .unwrap_or(800_000); // fallback to conservative estimate
+        .unwrap_or(crate::constants::GAS_LIMIT); // fallback to conservative estimate
 
     // ── 3. Profitability check with real gas estimate ────────────────────────
     // Use the actual on-chain liquidation bonus resolved by the scanner via

@@ -217,7 +217,7 @@ impl HuntLoanExecutor {
         est_gas: u64,
         t: Instant,
     ) -> Result<ExecutionResult> {
-        use crate::constants::{RBF_BRIBE_STEPS, RBF_WAIT_MS};
+        use crate::constants::{RBF_BRIBE_STEPS, RBF_WAIT_MS, GAS_LIMIT, GAS_HEADROOM_NUM, GAS_HEADROOM_DEN};
 
         // Use cached provider (private RPC for MEV protection)
         let provider = self.submit_provider.clone();
@@ -255,10 +255,20 @@ impl HuntLoanExecutor {
         .wrap_err("Nonce acquisition timed out after 10s")??;
 
         let gas_limit = if est_gas > 0 {
-            ((est_gas as u128 * 120 / 100).max(800_000)) as u64
+            ((est_gas as u128 * GAS_HEADROOM_NUM / GAS_HEADROOM_DEN).max(GAS_LIMIT as u128)) as u64
         } else {
-            800_000_u64
+            GAS_LIMIT
         };
+
+        // Gas-cost cap: refuse broadcast if estimated cost exceeds config ceiling
+        let est_gas_cost_wei = (gas_limit as u128).saturating_mul(base_fee_wei);
+        if est_gas_cost_wei > self.config.max_gas_cost_wei {
+            bail!(
+                "Estimated gas cost {:.6} ETH exceeds cap {:.6} ETH",
+                est_gas_cost_wei as f64 / 1e18,
+                self.config.max_gas_cost_wei as f64 / 1e18,
+            );
+        }
 
         for (attempt, &bribe_frac) in steps.iter().enumerate() {
             let gas_tier = gas::compute_profit_aware_fees_with_bribe(
@@ -395,9 +405,10 @@ impl HuntLoanExecutor {
         );
 
         let gas_limit = if est_gas > 0 {
-            ((est_gas as u128 * 120 / 100).max(800_000)) as u64
+            ((est_gas as u128 * crate::constants::GAS_HEADROOM_NUM / crate::constants::GAS_HEADROOM_DEN)
+                .max(crate::constants::GAS_LIMIT as u128)) as u64
         } else {
-            800_000_u64
+            crate::constants::GAS_LIMIT
         };
 
         TxFees {

@@ -5,9 +5,7 @@
 //! All caps enforced at compute time.
 
 use crate::constants::{
-    MAX_BRIBE_WEI, MAX_GAS_COST_WEI, MIN_NET_PROFIT_USD, MIN_WALLET_ETH,
-    BRIBE_CRASH, BRIBE_STABLE, BRIBE_ULTRA, BRIBE_VOLATILE,
-    GAS_LIMIT,
+    MAX_BRIBE_WEI, GAS_LIMIT,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,15 +106,6 @@ pub fn detect_regime(pct_change_5m: f64) -> Regime {
     if pct_change_5m <= -0.030 { Regime::Crash }
     else if pct_change_5m <= -0.015 { Regime::Volatile }
     else { Regime::Stable }
-}
-
-/// Bribe fraction based on HF urgency (used when gas tier bribe is overridden).
-#[allow(dead_code)]
-pub fn bribe_by_hf(hf: f64) -> f64 {
-    if hf <= 1.005 { BRIBE_ULTRA }
-    else if hf <= 1.010 { BRIBE_CRASH }
-    else if hf <= 1.040 { BRIBE_VOLATILE }
-    else { BRIBE_STABLE }
 }
 
 /// Compute bribe in wei as a fraction of gross profit, hard-capped.
@@ -236,44 +225,6 @@ pub fn compute_profit_aware_fees_with_bribe(
         max_priority_fee: priority_fee_per_gas.min(max_fee_per_gas),
         bribe_fraction,
     }
-}
-
-/// Validate all safety caps before broadcast.
-/// Returns Ok(()) or Err with the blocking reason.
-#[allow(dead_code)]
-pub fn validate_caps(
-    gas_cost_wei:   u128,
-    bribe_wei:      u128,
-    net_profit_usd: f64,
-    wallet_eth:     f64,
-) -> Result<(), String> {
-    if gas_cost_wei > MAX_GAS_COST_WEI {
-        return Err(format!(
-            "gas {:.6} ETH > cap {:.6} ETH",
-            gas_cost_wei as f64 / 1e18,
-            MAX_GAS_COST_WEI as f64 / 1e18
-        ));
-    }
-    if bribe_wei > MAX_BRIBE_WEI {
-        return Err(format!(
-            "bribe {:.6} ETH > cap {:.6} ETH",
-            bribe_wei as f64 / 1e18,
-            MAX_BRIBE_WEI as f64 / 1e18
-        ));
-    }
-    if net_profit_usd < MIN_NET_PROFIT_USD {
-        return Err(format!(
-            "net ${:.2} < floor ${:.2}",
-            net_profit_usd, MIN_NET_PROFIT_USD
-        ));
-    }
-    if wallet_eth < MIN_WALLET_ETH {
-        return Err(format!(
-            "wallet {:.4} ETH < safety {:.4} ETH",
-            wallet_eth, MIN_WALLET_ETH
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

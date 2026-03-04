@@ -15,7 +15,7 @@
 //!   PHASE 2 — Execution filters (STRONG_HF, margin, blacklist, daily budget)
 //!   PHASE 3 — Parallel JoinSet simulation + score-based candidate priority
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,7 +24,7 @@ use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use eyre::{bail, Result, WrapErr};
 use futures_util::StreamExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 
@@ -96,7 +96,8 @@ pub struct HuntLoanEngine {
     /// ETH price snapshot for 5-min regime detection: (price_usd, snapshot_time).
     last_eth_price: Mutex<(u128, Instant)>,
     /// Watchlist candidates cached in memory — refreshed by background discovery task.
-    candidates: Arc<Mutex<Vec<Address>>>,
+    /// RwLock<Arc<…>> allows O(1) snapshot via Arc::clone (no 45K-address memcpy per block).
+    candidates: Arc<RwLock<Arc<Vec<Address>>>>,
     /// Crash-mode hotset: positions near liquidation, updated each block from velocity + warm scan.
     hotset: Mutex<Vec<Address>>,
 }
@@ -115,7 +116,7 @@ impl HuntLoanEngine {
             blacklist:      Mutex::new(HashMap::new()),
             daily:          Mutex::new(DailyBudget { gas_wei: 0, bribe_wei: 0, reset_day: 0 }),
             last_eth_price: Mutex::new((0, Instant::now())),
-            candidates:     Arc::new(Mutex::new(Vec::new())),
+            candidates:     Arc::new(RwLock::new(Arc::new(Vec::new()))),
             hotset:         Mutex::new(Vec::new()),
         })
     }
@@ -164,7 +165,7 @@ impl HuntLoanEngine {
         match crate::load_candidates(&self.config.watchlist_path) {
             Ok(v) => {
                 info!("[HuntLoanEngine] Loaded {} initial candidates", v.len());
-                *self.candidates.lock().await = v;
+                *self.candidates.write().await = Arc::new(v);
             }
             Err(e) => warn!("[HuntLoanEngine] Initial candidate load failed: {}", e),
         }
@@ -197,7 +198,7 @@ impl HuntLoanEngine {
                         match crate::load_candidates(&path) {
                             Ok(v) => {
                                 let n = v.len();
-                                *candidates_arc.lock().await = v;
+                                *candidates_arc.write().await = Arc::new(v);
                                 info!("[discovery] Candidate cache updated: {} addresses", n);
                             }
                             Err(e) => warn!("[discovery] Failed to reload candidates: {}", e),
@@ -215,7 +216,7 @@ impl HuntLoanEngine {
 
             // Daily heartbeat — self-throttled to once per 24h inside send_heartbeat
             {
-                let n = self.candidates.lock().await.len();
+                let n = self.candidates.read().await.len();
                 tokio::spawn(async move { alerts::send_heartbeat(n).await; });
             }
 
@@ -309,16 +310,16 @@ impl HuntLoanEngine {
 
         // ── Stage 1: SCAN ─────────────────────────────────────────────────────
         let scan_t   = Instant::now();
-        let candidates = if regime == gas::Regime::Crash {
+        let candidates: Arc<Vec<Address>> = if regime == gas::Regime::Crash {
             let hs = self.hotset.lock().await;
             if hs.is_empty() {
-                self.candidates.lock().await.clone() // fallback to full watchlist
+                self.candidates.read().await.clone() // fallback to full watchlist
             } else {
                 info!(hotset_size = hs.len(), "CRASH MODE — scanning hotset only");
-                hs.clone()
+                Arc::new(hs.clone())
             }
         } else {
-            self.candidates.lock().await.clone()
+            self.candidates.read().await.clone()
         };
         if candidates.is_empty() {
             return Ok(());
@@ -707,7 +708,7 @@ impl HuntLoanEngine {
         // Moved AFTER execution to shave ~30-50ms from the critical path.
         // In crash mode we skip the warm scan entirely — hotset was populated on previous block.
         if regime != gas::Regime::Crash {
-            let all_candidates = self.candidates.lock().await.clone();
+            let all_candidates = self.candidates.read().await.clone();
             let warm = scanner::scan_warm(provider.as_ref(), &self.config, &all_candidates).await;
             let mut ve = self.velocity.lock().await;
             for wc in &warm { ve.record(wc.borrower, wc.health_factor); }
@@ -724,12 +725,14 @@ impl HuntLoanEngine {
             drop(ve); // release lock before spawning
 
             // Build hotset: warm-scan addresses below HF_HOT + velocity-hot addresses
+            let mut seen = HashSet::new();
             let mut new_hotset: Vec<Address> = warm.iter()
                 .filter(|wc| wc.health_factor > 0.0 && wc.health_factor < constants::HF_HOT)
                 .map(|wc| wc.borrower)
+                .filter(|a| seen.insert(*a))
                 .collect();
             for addr in vel_hot_addrs {
-                if !new_hotset.contains(&addr) {
+                if seen.insert(addr) {
                     new_hotset.push(addr);
                 }
             }

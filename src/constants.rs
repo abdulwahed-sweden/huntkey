@@ -63,6 +63,7 @@ pub const GOLDILOCKS_MAX_DEBT_USD: u64 = 500_000;
 
 // ── Gas caps (in wei) ──────────────────────────────────────────────────────
 /// 0.008 ETH — hard ceiling on per-tx gas cost
+#[allow(dead_code)] // cap is enforced via Config.max_gas_cost_wei
 pub const MAX_GAS_COST_WEI: u128 = 8_000_000_000_000_000; // 0.008 ETH
 /// 2 ETH -- absolute safety ceiling on sequencer bribe (configurable via MAX_BRIBE_WEI env).
 /// This is a catastrophe guard, NOT the economic limit. The profit-fraction cap
@@ -72,15 +73,21 @@ pub const MAX_BRIBE_WEI: u128 = 2_000_000_000_000_000_000; // 2 ETH
 /// Default 0.90 = willing to pay up to 90% of gross profit for inclusion.
 pub const DEFAULT_MAX_BRIBE_FRACTION: f64 = 0.90;
 /// Minimum net profit before firing
+#[allow(dead_code)] // enforced via Config.min_profit_usd
 pub const MIN_NET_PROFIT_USD: f64 = 10.0;
 /// Safety floor: skip execution if wallet balance is below this
+#[allow(dead_code)] // enforced via Config.min_wallet_eth_wei
 pub const MIN_WALLET_ETH: f64 = 0.005;
 
 // ── Bribe fractions by market regime ──────────────────────────────────────
 /// Ported from BRIBE_* constants in monitor_base.js CONFIG
+#[allow(dead_code)] // reference values for tier config documentation
 pub const BRIBE_STABLE:    f64 = 0.62;
+#[allow(dead_code)] // reference values for tier config documentation
 pub const BRIBE_VOLATILE:  f64 = 0.78;
+#[allow(dead_code)] // reference values for tier config documentation
 pub const BRIBE_CRASH:     f64 = 0.90;
+#[allow(dead_code)] // reference values for tier config documentation
 pub const BRIBE_ULTRA:     f64 = 0.94;  // HF <= 1.005
 #[allow(dead_code)] // absolute ceiling; RBF steps handle escalation
 pub const BRIBE_MAX:       f64 = 0.95;
@@ -89,6 +96,9 @@ pub const BRIBE_RETRY_INC: f64 = 0.05;
 
 // ── Execution constants ────────────────────────────────────────────────────
 pub const GAS_LIMIT:   u64 = 800_000;
+/// Gas-limit headroom: multiply estimate by NUM/DEN (120/100 = 1.20×).
+pub const GAS_HEADROOM_NUM: u128 = 120;
+pub const GAS_HEADROOM_DEN: u128 = 100;
 #[allow(dead_code)] // superseded by RBF_BRIBE_STEPS length
 pub const MAX_ATTEMPTS: u8 = 6;
 
