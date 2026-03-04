@@ -213,6 +213,12 @@ impl HuntLoanEngine {
                 last_summary = Instant::now();
             }
 
+            // Daily heartbeat — self-throttled to once per 24h inside send_heartbeat
+            {
+                let n = self.candidates.lock().await.len();
+                tokio::spawn(async move { alerts::send_heartbeat(n).await; });
+            }
+
             match self
                 .process_block(&ws_provider, block_num, base_fee, block_start, &reserve_cache)
                 .await

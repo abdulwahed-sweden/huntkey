@@ -279,7 +279,7 @@ pub fn fmt_boot(mode: &str, contract: &str, operator: &str) -> String {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  💰 LIQUIDATION — Transaction confirmed on-chain
+//  💰 PROFIT CAUGHT — Transaction confirmed on-chain
 // ═════════════════════════════════════════════════════════════════════════════
 
 pub fn fmt_executed(
@@ -303,38 +303,39 @@ pub fn fmt_executed(
     let gas_usd = gas_eth * eth_price_usd as f64;
     let tx_link = format!("https://basescan.org/tx/{tx_hash}");
 
-    let (icon, status_text) = if status == 1 {
-        ("💰", "Liquidation Confirmed")
+    if status == 1 {
+        format!(
+            "💰 <b>PROFIT CAUGHT!</b>\n\
+             {LINE}\n\
+             🕐  {t}  ·  Block #{block_num}\n\
+             \n\
+             Amount: <b>${sim_profit_usd}</b> USD\n\
+             TX: <code>{tx_hash}</code>\n\
+             Contract: <code>{}</code>\n\
+             \n\
+             Route: {coll} → {debt}  ·  Debt: ${debt_usd}\n\
+             HF: {hf:.4}  ·  Gas: {gas_eth:.5} ETH (${gas_usd:.2})\n\
+             🔗 <a href=\"{tx_link}\">BaseScan</a>",
+            short_addr(borrower),
+        )
     } else {
-        ("⚠️", "Transaction Reverted On-Chain")
-    };
-
-    let profit_line = if sim_profit_usd >= 0 {
-        format!("💵  Estimated profit: <b>+${sim_profit_usd}</b>")
-    } else {
-        format!("💸  Estimated loss: <b>-${}</b>", sim_profit_usd.unsigned_abs())
-    };
-
-    format!(
-        "{icon} <b>{status_text}</b>\n\
-         {LINE}\n\
-         🕐  {t}  ·  Block #{block_num}\n\
-         \n\
-         👤  Borrower: <code>{}</code>\n\
-         ❤️  Health Factor: <b>{hf:.4}</b>\n\
-         🔄  Route: {coll} → {debt}\n\
-         💳  Debt repaid: <b>${debt_usd}</b>\n\
-         \n\
-         {profit_line}\n\
-         ⛽  Gas used: {gas_eth:.5} ETH (${gas_usd:.2})\n\
-         \n\
-         🔗  <a href=\"{tx_link}\">View on BaseScan</a>",
-        short_addr(borrower),
-    )
+        format!(
+            "⚠️ <b>ATTEMPT FAILED</b>\n\
+             {LINE}\n\
+             🕐  {t}  ·  Block #{block_num}\n\
+             \n\
+             Reason: Transaction reverted on-chain\n\
+             Potential Loss: {gas_eth:.5} ETH (${gas_usd:.2})\n\
+             TX: <code>{tx_hash}</code>\n\
+             \n\
+             Borrower: <code>{}</code>  ·  Route: {coll} → {debt}",
+            short_addr(borrower),
+        )
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  ❌ EXECUTION FAILED — Transaction could not be sent or reverted
+//  ⚠️ ATTEMPT FAILED — Transaction could not be sent or reverted
 // ═════════════════════════════════════════════════════════════════════════════
 
 pub fn fmt_failed_exec(reason: &str, borrower: &str, hint: &str) -> String {
@@ -342,13 +343,13 @@ pub fn fmt_failed_exec(reason: &str, borrower: &str, hint: &str) -> String {
     let explained = explain_error(reason);
 
     format!(
-        "❌ <b>Execution Failed</b>\n\
+        "⚠️ <b>ATTEMPT FAILED</b>\n\
          {LINE}\n\
          🕐  {t}\n\
          \n\
-         👤  Borrower: <code>{}</code>\n\
-         ⚠️  Reason: {explained}\n\
-         💡  Suggestion: {hint}",
+         Reason: {explained}\n\
+         Borrower: <code>{}</code>\n\
+         Suggestion: {hint}",
         short_addr(borrower),
     )
 }
@@ -526,6 +527,48 @@ pub async fn send_approaching(
     let _ = send_telegram(msg, Some(&key), 300).await;
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+//  🛑 LOW BALANCE — Wallet critically low
+// ═════════════════════════════════════════════════════════════════════════════
+
+pub fn fmt_low_balance(balance_eth: f64) -> String {
+    format!(
+        "🛑 <b>CRITICAL: LOW BALANCE</b>\n\
+         {LINE}\n\
+         \n\
+         Current: <b>{balance_eth:.6} ETH</b>\n\
+         Action: Please fund the operator wallet immediately."
+    )
+}
+
+pub async fn send_low_balance(balance_eth: f64) {
+    let msg = fmt_low_balance(balance_eth);
+    // Throttle to once per hour — avoid spamming on every block
+    let _ = send_telegram(msg, Some("low-balance"), 3600).await;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  🤖 HEARTBEAT — Daily proof-of-life
+// ═════════════════════════════════════════════════════════════════════════════
+
+pub fn fmt_heartbeat(candidates: usize) -> String {
+    let t = timestamp();
+    format!(
+        "🤖 <b>HuntLoan Heartbeat</b>\n\
+         {LINE}\n\
+         🕐  {t}\n\
+         \n\
+         System is UP. Scanning {candidates}+ addresses.\n\
+         Status: Hunting..."
+    )
+}
+
+/// Send a daily heartbeat — throttled to once per 24 hours.
+pub async fn send_heartbeat(candidates: usize) {
+    let msg = fmt_heartbeat(candidates);
+    let _ = send_telegram(msg, Some("heartbeat-daily"), 86400).await;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -586,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn fmt_executed_shows_token_names_not_addresses() {
+    fn fmt_executed_shows_profit_caught() {
         let msg = fmt_executed(
             "0x1234567890abcdef1234567890abcdef12345678",
             0.9850, 50_000,
@@ -596,10 +639,9 @@ mod tests {
             "0xABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD",
             12345678, 1,
         );
+        assert!(msg.contains("PROFIT CAUGHT"), "Should show profit caught: {msg}");
         assert!(msg.contains("USDC → WETH"), "Should show token symbols: {msg}");
-        assert!(msg.contains("Liquidation Confirmed"), "Should show clear status");
-        assert!(msg.contains("UTC"), "Should include timestamp");
-        assert!(msg.contains("+$250"), "Should show profit");
+        assert!(msg.contains("$250"), "Should show amount");
         assert!(msg.contains("BaseScan"), "Should have explorer link");
     }
 

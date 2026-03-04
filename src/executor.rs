@@ -228,9 +228,14 @@ impl HuntLoanExecutor {
             .map(|b| b.to::<u128>())
             .unwrap_or(u128::MAX);
         if balance_wei < self.config.min_wallet_eth_wei {
+            let bal_eth = balance_wei as f64 / 1e18;
+            // Fire low-balance Telegram alert (throttled to 1/hr inside)
+            tokio::spawn(async move {
+                crate::alerts::send_low_balance(bal_eth).await;
+            });
             bail!(
                 "Wallet {:.6} ETH below safety floor {:.6} ETH — refusing broadcast to preserve capital",
-                balance_wei as f64 / 1e18,
+                bal_eth,
                 self.config.min_wallet_eth_wei as f64 / 1e18,
             );
         }
