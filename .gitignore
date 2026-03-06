@@ -18,6 +18,9 @@ lib/
 logs/
 *.log
 /tmp/
+trades.csv
+nohup.out
+node_modules/
 
 # ── macOS ───────────────────────────────────────────────────────────────────
 .DS_Store
