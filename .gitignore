@@ -3,24 +3,10 @@
 .env.*
 !.env.example
 
-# ── Rust ────────────────────────────────────────────────────────────────────
-/target/
-Cargo.lock.bak
-
-# ── Foundry ─────────────────────────────────────────────────────────────────
-out/
-cache/
-broadcast/
-lib/
-.foundry/
-
 # ── Logs / runtime output ───────────────────────────────────────────────────
-logs/
 *.log
 /tmp/
-trades.csv
 nohup.out
-node_modules/
 
 # ── macOS ───────────────────────────────────────────────────────────────────
 .DS_Store
@@ -34,6 +20,10 @@ node_modules/
 *.swo
 *~
 
-# ── Deployment artifacts ────────────────────────────────────────────────────
-ecosystem.config.js
-watchlist.json
+# ── Node ────────────────────────────────────────────────────────────────────
+node_modules/
+
+
+# Added by cargo
+
+/target
