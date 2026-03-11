@@ -74,22 +74,30 @@ fn main() {
     // Build and sign a sample intent
     let verifying_contract = [0xAA; 20];
     let fn_sig = [0xa9, 0x05, 0x9c, 0xbb]; // transfer(address,uint256)
+    let call_data = [0xa9, 0x05, 0x9c, 0xbb, 0x00, 0x00]; // sample calldata
+    let data_hash = huntkey::call_data_hash(&call_data);
     let intent = SovereignIntent {
         target_contract: [0xBB; 20],
         function_sig: fn_sig,
+        recipient: [0xCC; 20],
+        asset_address: [0x00; 20],
+        call_data_hash: data_hash,
         max_value: 1_000_000_000_000_000_000, // 1 ETH in wei
         expiration: 1800000000,
         chain_id: 1,
         nonce: 0,
     };
 
-    println!("\n  --- Signing Intent ---");
-    println!("  Target    : 0x{}", hex::encode(intent.target_contract));
-    println!("  Function  : 0x{}", hex::encode(intent.function_sig));
-    println!("  Max Value : {} wei", intent.max_value);
-    println!("  Expiry    : {}", intent.expiration);
-    println!("  Chain ID  : {}", intent.chain_id);
-    println!("  Nonce     : {}", intent.nonce);
+    println!("\n  --- Signing Intent (v2) ---");
+    println!("  Target      : 0x{}", hex::encode(intent.target_contract));
+    println!("  Function    : 0x{}", hex::encode(intent.function_sig));
+    println!("  Recipient   : 0x{}", hex::encode(intent.recipient));
+    println!("  Asset       : 0x{}", hex::encode(intent.asset_address));
+    println!("  CallDataHash: 0x{}", hex::encode(intent.call_data_hash));
+    println!("  Max Value   : {} wei", intent.max_value);
+    println!("  Expiry      : {}", intent.expiration);
+    println!("  Chain ID    : {}", intent.chain_id);
+    println!("  Nonce       : {}", intent.nonce);
 
     let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
     let sig = sign_intent(&intent, &verifying_contract, &action_privkey);
@@ -279,9 +287,14 @@ fn main() {
     println!("  Match            : {}", if recovered_parent == action_key.eth_address.unwrap() { "YES" } else { "NO" });
 
     // Session key signs an intent
+    let session_call_data = [0xa9, 0x05, 0x9c, 0xbb, 0x01, 0x02];
+    let session_data_hash = huntkey::call_data_hash(&session_call_data);
     let session_intent = SovereignIntent {
         target_contract: target_contract,
         function_sig: fn_sig,
+        recipient: [0xEE; 20],
+        asset_address: [0x00; 20],
+        call_data_hash: session_data_hash,
         max_value: 1_000_000_000_000_000_000,
         expiration: 1800000000,
         chain_id: 1,

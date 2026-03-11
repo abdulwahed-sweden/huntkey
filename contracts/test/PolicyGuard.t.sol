@@ -9,10 +9,12 @@ import {Test} from "forge-std/Test.sol";
 contract DummyTarget {
     uint256 public lastValue;
     address public lastSender;
+    address public lastRecipient;
 
-    function doSomething(uint256 val) external payable {
+    function doSomething(address recipient, uint256 val) external payable {
         lastValue = val;
         lastSender = msg.sender;
+        lastRecipient = recipient;
     }
 
     function otherFunction(uint256 val) external {
@@ -37,10 +39,13 @@ contract ExecutionGatewayTest is Test {
         guard.authorizeKey(actionSigner);
     }
 
-    /// @dev Build the EIP-712 intent digest.
+    /// @dev Build the EIP-712 intent digest (v2 with recipient, assetAddress, callDataHash).
     function _digest(
         address targetContract,
         bytes4 functionSig,
+        address recipient,
+        address assetAddress,
+        bytes32 dataHash,
         uint128 maxValue,
         uint64 expiration,
         uint64 intentChainId,
@@ -51,6 +56,9 @@ contract ExecutionGatewayTest is Test {
                 guard.INTENT_TYPEHASH(),
                 targetContract,
                 functionSig,
+                recipient,
+                assetAddress,
+                dataHash,
                 maxValue,
                 expiration,
                 intentChainId,
@@ -136,22 +144,25 @@ contract ExecutionGatewayTest is Test {
     }
 
     // =======================================================================
-    // Original 6 tests (direct authorization)
+    // Direct authorization tests (updated for v2 intent)
     // =======================================================================
 
     function testValidateIntent() public {
         address target = address(0xBEEF);
         bytes4 fnSig = bytes4(0xa9059cbb);
+        address recipient = address(0x1234);
+        address asset = address(0);
+        bytes32 dataHash = keccak256("test");
         uint128 maxVal = 1 ether;
         uint64 exp = uint64(block.timestamp + 1 hours);
         uint64 chainId = uint64(block.chainid);
         uint64 nonce = 0;
 
-        bytes32 digest = _digest(target, fnSig, maxVal, exp, chainId, nonce);
+        bytes32 digest = _digest(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(ACTION_KEY, digest);
 
         guard.validateIntent{value: 0.5 ether}(
-            target, fnSig, maxVal, exp, chainId, nonce, v, r, s
+            target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, v, r, s
         );
 
         assertEq(guard.nonces(actionSigner), 1);
@@ -160,32 +171,38 @@ contract ExecutionGatewayTest is Test {
     function testRevertExpiredIntent() public {
         address target = address(0xBEEF);
         bytes4 fnSig = bytes4(0xa9059cbb);
+        address recipient = address(0x1234);
+        address asset = address(0);
+        bytes32 dataHash = keccak256("test");
         uint128 maxVal = 1 ether;
         uint64 exp = uint64(block.timestamp - 1);
         uint64 chainId = uint64(block.chainid);
         uint64 nonce = 0;
 
-        bytes32 digest = _digest(target, fnSig, maxVal, exp, chainId, nonce);
+        bytes32 digest = _digest(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(ACTION_KEY, digest);
 
         vm.expectRevert("intent expired");
-        guard.validateIntent(target, fnSig, maxVal, exp, chainId, nonce, v, r, s);
+        guard.validateIntent(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, v, r, s);
     }
 
     function testRevertValueExceedsCap() public {
         address target = address(0xBEEF);
         bytes4 fnSig = bytes4(0xa9059cbb);
+        address recipient = address(0x1234);
+        address asset = address(0);
+        bytes32 dataHash = keccak256("test");
         uint128 maxVal = 0.5 ether;
         uint64 exp = uint64(block.timestamp + 1 hours);
         uint64 chainId = uint64(block.chainid);
         uint64 nonce = 0;
 
-        bytes32 digest = _digest(target, fnSig, maxVal, exp, chainId, nonce);
+        bytes32 digest = _digest(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(ACTION_KEY, digest);
 
         vm.expectRevert("value exceeds cap");
         guard.validateIntent{value: 1 ether}(
-            target, fnSig, maxVal, exp, chainId, nonce, v, r, s
+            target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, v, r, s
         );
     }
 
@@ -194,44 +211,53 @@ contract ExecutionGatewayTest is Test {
 
         address target = address(0xBEEF);
         bytes4 fnSig = bytes4(0xa9059cbb);
+        address recipient = address(0x1234);
+        address asset = address(0);
+        bytes32 dataHash = keccak256("test");
         uint128 maxVal = 1 ether;
         uint64 exp = uint64(block.timestamp + 1 hours);
         uint64 chainId = uint64(block.chainid);
         uint64 nonce = 0;
 
-        bytes32 digest = _digest(target, fnSig, maxVal, exp, chainId, nonce);
+        bytes32 digest = _digest(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(rogue, digest);
 
         vm.expectRevert("unauthorized key");
-        guard.validateIntent(target, fnSig, maxVal, exp, chainId, nonce, v, r, s);
+        guard.validateIntent(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, v, r, s);
     }
 
     function testRevertNonceReplay() public {
         address target = address(0xBEEF);
         bytes4 fnSig = bytes4(0xa9059cbb);
+        address recipient = address(0x1234);
+        address asset = address(0);
+        bytes32 dataHash = keccak256("test");
         uint128 maxVal = 1 ether;
         uint64 exp = uint64(block.timestamp + 1 hours);
         uint64 chainId = uint64(block.chainid);
         uint64 nonce = 0;
 
-        bytes32 digest = _digest(target, fnSig, maxVal, exp, chainId, nonce);
+        bytes32 digest = _digest(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(ACTION_KEY, digest);
 
-        guard.validateIntent(target, fnSig, maxVal, exp, chainId, nonce, v, r, s);
+        guard.validateIntent(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, v, r, s);
 
         vm.expectRevert("invalid nonce");
-        guard.validateIntent(target, fnSig, maxVal, exp, chainId, nonce, v, r, s);
+        guard.validateIntent(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, v, r, s);
     }
 
     function testRevertMalleableSignature() public {
         address target = address(0xBEEF);
         bytes4 fnSig = bytes4(0xa9059cbb);
+        address recipient = address(0x1234);
+        address asset = address(0);
+        bytes32 dataHash = keccak256("test");
         uint128 maxVal = 1 ether;
         uint64 exp = uint64(block.timestamp + 1 hours);
         uint64 chainId = uint64(block.chainid);
         uint64 nonce = 0;
 
-        bytes32 digest = _digest(target, fnSig, maxVal, exp, chainId, nonce);
+        bytes32 digest = _digest(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(ACTION_KEY, digest);
 
         bytes32 flippedS = bytes32(SECP256K1_N - uint256(s));
@@ -239,7 +265,7 @@ contract ExecutionGatewayTest is Test {
 
         vm.expectRevert("malleable signature: s too high");
         guard.validateIntent(
-            target, fnSig, maxVal, exp, chainId, nonce, flippedV, r, flippedS
+            target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, flippedV, r, flippedS
         );
     }
 
@@ -288,12 +314,16 @@ contract ExecutionGatewayTest is Test {
             s: dS
         });
 
-        bytes32 intentDigest = _digest(target, intentFnSig, intentVal, intentExp, chainId, intentNonce);
+        bytes32 dataHash = keccak256("delegated-call");
+        bytes32 intentDigest = _digest(target, intentFnSig, address(0), address(0), dataHash, intentVal, intentExp, chainId, intentNonce);
         (uint8 iV, bytes32 iR, bytes32 iS) = vm.sign(SHOPPING_KEY, intentDigest);
 
         intent = IdentityStore.IntentParams({
             targetContract: target,
             functionSig: intentFnSig,
+            recipient: address(0),
+            assetAddress: address(0),
+            callDataHash: dataHash,
             maxValue: intentVal,
             expiration: intentExp,
             chainId: chainId,
@@ -349,12 +379,15 @@ contract ExecutionGatewayTest is Test {
             chainId: chainId, nonce: 0, v: dV, r: dR, s: dS
         });
 
-        bytes32 intentDigest = _digest(address(0xCAFE), scope, 0.5 ether, exp, chainId, 0);
+        bytes32 dataHash = keccak256("test");
+        bytes32 intentDigest = _digest(address(0xCAFE), scope, address(0), address(0), dataHash, 0.5 ether, exp, chainId, 0);
         (uint8 iV, bytes32 iR, bytes32 iS) = vm.sign(SHOPPING_KEY, intentDigest);
 
         IdentityStore.IntentParams memory intent = IdentityStore.IntentParams({
-            targetContract: address(0xCAFE), functionSig: scope, maxValue: 0.5 ether,
-            expiration: exp, chainId: chainId, nonce: 0, v: iV, r: iR, s: iS
+            targetContract: address(0xCAFE), functionSig: scope,
+            recipient: address(0), assetAddress: address(0), callDataHash: dataHash,
+            maxValue: 0.5 ether, expiration: exp, chainId: chainId, nonce: 0,
+            v: iV, r: iR, s: iS
         });
 
         vm.expectRevert("unregistered prover");
@@ -451,6 +484,7 @@ contract ExecutionGatewayTest is Test {
 
         assertEq(guard.recoveryApprovals(oldRoot), 1);
         assertEq(guard.pendingNewRoot(oldRoot), newRoot);
+        assertEq(uint256(guard.identityState(oldRoot)), uint256(IdentityStore.IdentityState.RecoveryPending));
 
         (uint8 v1, bytes32 r1, bytes32 s1) = vm.sign(GUARDIAN_KEY_1, digest);
         guard.supportRecovery(oldRoot, v1, r1, s1);
@@ -474,6 +508,10 @@ contract ExecutionGatewayTest is Test {
         assertEq(guard.pendingNewRoot(oldRoot), address(0));
         assertEq(guard.recoveryApprovals(oldRoot), 0);
         assertEq(guard.recoveryNonces(oldRoot), 1);
+
+        // After finalization, both identities should be Active
+        assertEq(uint256(guard.identityState(oldRoot)), uint256(IdentityStore.IdentityState.Active));
+        assertEq(uint256(guard.identityState(newRoot)), uint256(IdentityStore.IdentityState.Active));
     }
 
     function testRecoveryBetrayalCancellation() public {
@@ -488,6 +526,7 @@ contract ExecutionGatewayTest is Test {
         guard.supportRecovery(oldRoot, v1, r1, s1);
 
         assertTrue(guard.recoveryInitiatedAt(oldRoot) > 0, "timelock started");
+        assertEq(uint256(guard.identityState(oldRoot)), uint256(IdentityStore.IdentityState.RecoveryPending));
 
         vm.prank(oldRoot);
         guard.cancelRecovery(oldRoot);
@@ -496,6 +535,7 @@ contract ExecutionGatewayTest is Test {
         assertEq(guard.recoveryApprovals(oldRoot), 0);
         assertEq(guard.recoveryInitiatedAt(oldRoot), 0);
         assertTrue(guard.authorizedProvers(oldRoot));
+        assertEq(uint256(guard.identityState(oldRoot)), uint256(IdentityStore.IdentityState.Active));
 
         vm.expectRevert("no pending recovery");
         guard.finalizeRecovery(oldRoot);
@@ -571,8 +611,6 @@ contract ExecutionGatewayTest is Test {
     // Session Key & Execution Gateway tests
     // =======================================================================
 
-    // Session key derived from ACTION_KEY: keccak256(ACTION_KEY || nonce=0)
-    // We use a second key as the "session" key for testing
     uint256 constant SESSION_KEY = 0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6;
 
     function _buildExecuteCall(
@@ -585,14 +623,13 @@ contract ExecutionGatewayTest is Test {
         uint128 intentVal,
         uint64 intentExp,
         uint64 intentNonce,
-        bytes memory /* callData */
+        bytes memory callData
     ) internal view returns (
         ExecutionGateway.SessionParams memory sess,
         IdentityStore.IntentParams memory intent
     ) {
         uint64 chainId = uint64(block.chainid);
 
-        // Session cert signed by ACTION_KEY
         bytes32 sessDigest = _sessionDigest(sessionAddr, actionSigner, scope, target, sessionCap, sessionExp, chainId);
         (uint8 sV, bytes32 sR, bytes32 sS) = vm.sign(ACTION_KEY, sessDigest);
 
@@ -609,13 +646,16 @@ contract ExecutionGatewayTest is Test {
             s: sS
         });
 
-        // Intent signed by session key
-        bytes32 intentDigest = _digest(target, scope, intentVal, intentExp, chainId, intentNonce);
+        bytes32 dataHash = keccak256(callData);
+        bytes32 intentDigest = _digest(target, scope, address(0), address(0), dataHash, intentVal, intentExp, chainId, intentNonce);
         (uint8 iV, bytes32 iR, bytes32 iS) = vm.sign(sessionPrivKey, intentDigest);
 
         intent = IdentityStore.IntentParams({
             targetContract: target,
             functionSig: scope,
+            recipient: address(0),
+            assetAddress: address(0),
+            callDataHash: dataHash,
             maxValue: intentVal,
             expiration: intentExp,
             chainId: chainId,
@@ -634,13 +674,12 @@ contract ExecutionGatewayTest is Test {
         address sessionAddr = vm.addr(SESSION_KEY);
         bytes4 scope = DummyTarget.doSomething.selector;
         uint64 exp = uint64(block.timestamp + 1 hours);
+        bytes memory cd = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(42));
 
         (ExecutionGateway.SessionParams memory sess, IdentityStore.IntentParams memory intent) =
-            _buildExecuteCall(SESSION_KEY, sessionAddr, scope, address(dummy), 1 ether, exp, 0.5 ether, exp, 0,
-                abi.encodeWithSelector(DummyTarget.doSomething.selector, uint256(42)));
+            _buildExecuteCall(SESSION_KEY, sessionAddr, scope, address(dummy), 1 ether, exp, 0.5 ether, exp, 0, cd);
 
-        guard.execute{value: 0.1 ether}(sess, intent, address(dummy),
-            abi.encodeWithSelector(DummyTarget.doSomething.selector, uint256(42)));
+        guard.execute{value: 0.1 ether}(sess, intent, address(dummy), cd);
 
         assertEq(dummy.lastValue(), 42);
         assertTrue(guard.usedSessionKeys(sessionAddr), "session key should be burned");
@@ -654,45 +693,42 @@ contract ExecutionGatewayTest is Test {
         address sessionAddr = vm.addr(SESSION_KEY);
         bytes4 scope = DummyTarget.doSomething.selector;
         uint64 exp = uint64(block.timestamp + 1 hours);
+        bytes memory cd = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(1));
 
         (ExecutionGateway.SessionParams memory sess1, IdentityStore.IntentParams memory intent1) =
-            _buildExecuteCall(SESSION_KEY, sessionAddr, scope, address(dummy), 1 ether, exp, 0.5 ether, exp, 0,
-                abi.encodeWithSelector(DummyTarget.doSomething.selector, uint256(1)));
+            _buildExecuteCall(SESSION_KEY, sessionAddr, scope, address(dummy), 1 ether, exp, 0.5 ether, exp, 0, cd);
 
-        guard.execute(sess1, intent1, address(dummy),
-            abi.encodeWithSelector(DummyTarget.doSomething.selector, uint256(1)));
+        guard.execute(sess1, intent1, address(dummy), cd);
 
-        // Second use with different nonce — should still fail because session key is burned
+        bytes memory cd2 = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(2));
         (ExecutionGateway.SessionParams memory sess2, IdentityStore.IntentParams memory intent2) =
-            _buildExecuteCall(SESSION_KEY, sessionAddr, scope, address(dummy), 1 ether, exp, 0.5 ether, exp, 1,
-                abi.encodeWithSelector(DummyTarget.doSomething.selector, uint256(2)));
+            _buildExecuteCall(SESSION_KEY, sessionAddr, scope, address(dummy), 1 ether, exp, 0.5 ether, exp, 1, cd2);
 
         vm.expectRevert("session key already used");
-        guard.execute(sess2, intent2, address(dummy),
-            abi.encodeWithSelector(DummyTarget.doSomething.selector, uint256(2)));
+        guard.execute(sess2, intent2, address(dummy), cd2);
     }
 
     // -----------------------------------------------------------------------
-    // 23. Selector mismatch — calldata selector != intent selector
+    // 23. Selector mismatch
     // -----------------------------------------------------------------------
     function testExecuteRevertSelectorMismatch() public {
         DummyTarget dummy = new DummyTarget();
         address sessionAddr = vm.addr(SESSION_KEY);
         bytes4 scope = DummyTarget.doSomething.selector;
         uint64 exp = uint64(block.timestamp + 1 hours);
+        bytes memory cd = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(1));
 
         (ExecutionGateway.SessionParams memory sess, IdentityStore.IntentParams memory intent) =
-            _buildExecuteCall(SESSION_KEY, sessionAddr, scope, address(dummy), 1 ether, exp, 0.5 ether, exp, 0,
-                abi.encodeWithSelector(DummyTarget.doSomething.selector, uint256(1)));
+            _buildExecuteCall(SESSION_KEY, sessionAddr, scope, address(dummy), 1 ether, exp, 0.5 ether, exp, 0, cd);
 
-        // Call with different selector in calldata
+        // Call with different selector
         vm.expectRevert("selector mismatch");
         guard.execute(sess, intent, address(dummy),
             abi.encodeWithSelector(DummyTarget.otherFunction.selector, uint256(1)));
     }
 
     // -----------------------------------------------------------------------
-    // 24. Target mismatch — call target != intent target
+    // 24. Target mismatch
     // -----------------------------------------------------------------------
     function testExecuteRevertTargetMismatch() public {
         DummyTarget dummy = new DummyTarget();
@@ -700,14 +736,13 @@ contract ExecutionGatewayTest is Test {
         address sessionAddr = vm.addr(SESSION_KEY);
         bytes4 scope = DummyTarget.doSomething.selector;
         uint64 exp = uint64(block.timestamp + 1 hours);
+        bytes memory cd = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(1));
 
         (ExecutionGateway.SessionParams memory sess, IdentityStore.IntentParams memory intent) =
-            _buildExecuteCall(SESSION_KEY, sessionAddr, scope, address(dummy), 1 ether, exp, 0.5 ether, exp, 0,
-                abi.encodeWithSelector(DummyTarget.doSomething.selector, uint256(1)));
+            _buildExecuteCall(SESSION_KEY, sessionAddr, scope, address(dummy), 1 ether, exp, 0.5 ether, exp, 0, cd);
 
         vm.expectRevert("call target mismatch");
-        guard.execute(sess, intent, address(other),
-            abi.encodeWithSelector(DummyTarget.doSomething.selector, uint256(1)));
+        guard.execute(sess, intent, address(other), cd);
     }
 
     // -----------------------------------------------------------------------
@@ -719,18 +754,17 @@ contract ExecutionGatewayTest is Test {
         bytes4 scope = DummyTarget.doSomething.selector;
         uint64 expiredTs = uint64(block.timestamp - 1);
         uint64 futureTs = uint64(block.timestamp + 1 hours);
+        bytes memory cd = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(1));
 
         (ExecutionGateway.SessionParams memory sess, IdentityStore.IntentParams memory intent) =
-            _buildExecuteCall(SESSION_KEY, sessionAddr, scope, address(dummy), 1 ether, expiredTs, 0.5 ether, futureTs, 0,
-                abi.encodeWithSelector(DummyTarget.doSomething.selector, uint256(1)));
+            _buildExecuteCall(SESSION_KEY, sessionAddr, scope, address(dummy), 1 ether, expiredTs, 0.5 ether, futureTs, 0, cd);
 
         vm.expectRevert("session expired");
-        guard.execute(sess, intent, address(dummy),
-            abi.encodeWithSelector(DummyTarget.doSomething.selector, uint256(1)));
+        guard.execute(sess, intent, address(dummy), cd);
     }
 
     // -----------------------------------------------------------------------
-    // 26. Unauthorized parent — session cert signed by non-authorized key
+    // 26. Unauthorized parent
     // -----------------------------------------------------------------------
     function testExecuteRevertUnauthorizedParent() public {
         DummyTarget dummy = new DummyTarget();
@@ -740,8 +774,8 @@ contract ExecutionGatewayTest is Test {
         bytes4 scope = DummyTarget.doSomething.selector;
         uint64 exp = uint64(block.timestamp + 1 hours);
         uint64 chainId = uint64(block.chainid);
+        bytes memory cd = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(1));
 
-        // Session cert signed by rogue key (not authorized)
         bytes32 sessDigest = _sessionDigest(sessionAddr, rogueAddr, scope, address(dummy), 1 ether, exp, chainId);
         (uint8 sV, bytes32 sR, bytes32 sS) = vm.sign(rogueParent, sessDigest);
 
@@ -750,17 +784,19 @@ contract ExecutionGatewayTest is Test {
             maxValue: 1 ether, expiration: exp, chainId: chainId, v: sV, r: sR, s: sS
         });
 
-        bytes32 intentDigest = _digest(address(dummy), scope, 0.5 ether, exp, chainId, 0);
+        bytes32 dataHash = keccak256(cd);
+        bytes32 intentDigest = _digest(address(dummy), scope, address(0), address(0), dataHash, 0.5 ether, exp, chainId, 0);
         (uint8 iV, bytes32 iR, bytes32 iS) = vm.sign(SESSION_KEY, intentDigest);
 
         IdentityStore.IntentParams memory intent = IdentityStore.IntentParams({
-            targetContract: address(dummy), functionSig: scope, maxValue: 0.5 ether,
-            expiration: exp, chainId: chainId, nonce: 0, v: iV, r: iR, s: iS
+            targetContract: address(dummy), functionSig: scope,
+            recipient: address(0), assetAddress: address(0), callDataHash: dataHash,
+            maxValue: 0.5 ether, expiration: exp, chainId: chainId, nonce: 0,
+            v: iV, r: iR, s: iS
         });
 
         vm.expectRevert("session parent not authorized");
-        guard.execute(sess, intent, address(dummy),
-            abi.encodeWithSelector(DummyTarget.doSomething.selector, uint256(1)));
+        guard.execute(sess, intent, address(dummy), cd);
     }
 
     // -----------------------------------------------------------------------
@@ -771,14 +807,91 @@ contract ExecutionGatewayTest is Test {
         address sessionAddr = vm.addr(SESSION_KEY);
         bytes4 scope = DummyTarget.doSomething.selector;
         uint64 exp = uint64(block.timestamp + 1 hours);
+        bytes memory cd = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(1));
 
-        // Session cap 0.1 ether but intent wants 1 ether
         (ExecutionGateway.SessionParams memory sess, IdentityStore.IntentParams memory intent) =
-            _buildExecuteCall(SESSION_KEY, sessionAddr, scope, address(dummy), 0.1 ether, exp, 1 ether, exp, 0,
-                abi.encodeWithSelector(DummyTarget.doSomething.selector, uint256(1)));
+            _buildExecuteCall(SESSION_KEY, sessionAddr, scope, address(dummy), 0.1 ether, exp, 1 ether, exp, 0, cd);
 
         vm.expectRevert("intent exceeds session cap");
-        guard.execute(sess, intent, address(dummy),
-            abi.encodeWithSelector(DummyTarget.doSomething.selector, uint256(1)));
+        guard.execute(sess, intent, address(dummy), cd);
+    }
+
+    // -----------------------------------------------------------------------
+    // 28. Malicious calldata mutation — changing a byte causes revert
+    // -----------------------------------------------------------------------
+    function testMaliciousCalldataMutation() public {
+        DummyTarget dummy = new DummyTarget();
+        address sessionAddr = vm.addr(SESSION_KEY);
+        bytes4 scope = DummyTarget.doSomething.selector;
+        uint64 exp = uint64(block.timestamp + 1 hours);
+
+        // Original calldata: doSomething(0x1234, 42)
+        bytes memory originalCd = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(42));
+
+        // Sign the intent binding to the original calldata hash
+        (ExecutionGateway.SessionParams memory sess, IdentityStore.IntentParams memory intent) =
+            _buildExecuteCall(SESSION_KEY, sessionAddr, scope, address(dummy), 1 ether, exp, 0.5 ether, exp, 0, originalCd);
+
+        // Mutated calldata: change recipient from 0x1234 to 0x5678
+        bytes memory mutatedCd = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x5678), uint256(42));
+
+        // Gateway must reject because keccak256(mutatedCd) != intent.callDataHash
+        vm.expectRevert("calldata hash mismatch");
+        guard.execute(sess, intent, address(dummy), mutatedCd);
+    }
+
+    // -----------------------------------------------------------------------
+    // 29. Execution blocked during recovery
+    // -----------------------------------------------------------------------
+    function testExecutionBlockedDuringRecovery() public {
+        // Setup: register action key's parent as a prover with guardians
+        (address oldRoot, address newRoot,,,) = _setupRecovery();
+
+        // Also authorize ACTION_KEY under the oldRoot identity
+        guard.authorizeKey(actionSigner);
+
+        // Initiate recovery — sets identity to RecoveryPending
+        uint64 chainId = uint64(block.chainid);
+        bytes32 recoveryDigestVal = _recoveryDigest(oldRoot, newRoot, chainId, 0);
+        (uint8 v0, bytes32 r0, bytes32 s0) = vm.sign(GUARDIAN_KEY_0, recoveryDigestVal);
+        guard.initiateRecovery(oldRoot, newRoot, v0, r0, s0);
+
+        // Verify identity is in RecoveryPending
+        assertEq(uint256(guard.identityState(oldRoot)), uint256(IdentityStore.IdentityState.RecoveryPending));
+
+        // Try to execute with a session cert whose parent is actionSigner
+        // but we need to test that the identity state check blocks execution
+        // We'll use oldRoot as the parent (since it's the one in RecoveryPending)
+        DummyTarget dummy = new DummyTarget();
+        address sessionAddr = vm.addr(SESSION_KEY);
+        bytes4 scope = DummyTarget.doSomething.selector;
+        uint64 exp = uint64(block.timestamp + 1 hours);
+        bytes memory cd = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(42));
+
+        // Create session cert with oldRoot as parent
+        guard.authorizeKey(oldRoot);
+
+        bytes32 sessDigest = _sessionDigest(sessionAddr, oldRoot, scope, address(dummy), 1 ether, exp, chainId);
+        (uint8 sV, bytes32 sR, bytes32 sS) = vm.sign(OLD_ROOT_KEY, sessDigest);
+
+        ExecutionGateway.SessionParams memory sess = ExecutionGateway.SessionParams({
+            session: sessionAddr, parent: oldRoot, scope: scope, target: address(dummy),
+            maxValue: 1 ether, expiration: exp, chainId: chainId, v: sV, r: sR, s: sS
+        });
+
+        bytes32 dataHash = keccak256(cd);
+        bytes32 intentDigest = _digest(address(dummy), scope, address(0), address(0), dataHash, 0.5 ether, exp, chainId, 0);
+        (uint8 iV, bytes32 iR, bytes32 iS) = vm.sign(SESSION_KEY, intentDigest);
+
+        IdentityStore.IntentParams memory intent = IdentityStore.IntentParams({
+            targetContract: address(dummy), functionSig: scope,
+            recipient: address(0), assetAddress: address(0), callDataHash: dataHash,
+            maxValue: 0.5 ether, expiration: exp, chainId: chainId, nonce: 0,
+            v: iV, r: iR, s: iS
+        });
+
+        // Execution must be blocked — identity is in RecoveryPending
+        vm.expectRevert("identity not active");
+        guard.execute(sess, intent, address(dummy), cd);
     }
 }

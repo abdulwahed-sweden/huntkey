@@ -75,6 +75,9 @@ contract ExecutionGateway is IdentityStore {
         address target,
         bytes calldata callData
     ) external payable {
+        // --- Identity state check ---
+        require(identityState[session.parent] == IdentityState.Active, "identity not active");
+
         // --- Layer 1: Validate session certificate ---
         require(block.timestamp <= session.expiration, "session expired");
         require(session.chainId == uint64(block.chainid), "session chain mismatch");
@@ -100,6 +103,9 @@ contract ExecutionGateway is IdentityStore {
         require(target == intent.targetContract, "call target mismatch");
         require(callData.length >= 4, "calldata too short");
         require(bytes4(callData[:4]) == intent.functionSig, "selector mismatch");
+
+        // --- CallData hash verification ---
+        require(keccak256(callData) == intent.callDataHash, "calldata hash mismatch");
 
         // --- Value bounds from session certificate ---
         require(intent.maxValue <= session.maxValue, "intent exceeds session cap");

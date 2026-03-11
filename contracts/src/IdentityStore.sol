@@ -3,10 +3,13 @@ pragma solidity ^0.8.28;
 
 /// @title IdentityStore — Identity state, delegation verification, and social recovery
 abstract contract IdentityStore {
+    // --- Identity state enum ---
+    enum IdentityState { Active, RecoveryPending, Frozen }
+
     // --- EIP-712 constants ---
     bytes32 public constant INTENT_TYPEHASH =
         keccak256(
-            "SovereignIntent(address targetContract,bytes4 functionSig,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce)"
+            "SovereignIntent(address targetContract,bytes4 functionSig,address recipient,address assetAddress,bytes32 callDataHash,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce)"
         );
 
     bytes32 public constant DELEGATION_TYPEHASH =
@@ -45,6 +48,9 @@ abstract contract IdentityStore {
     struct IntentParams {
         address targetContract;
         bytes4 functionSig;
+        address recipient;
+        address assetAddress;
+        bytes32 callDataHash;
         uint128 maxValue;
         uint64 expiration;
         uint64 chainId;
@@ -69,6 +75,10 @@ abstract contract IdentityStore {
     mapping(address => mapping(address => bool)) public recoveryApproved;
     mapping(address => uint256) public recoveryNonces;
 
+    // --- Identity state & session epoch ---
+    mapping(address => IdentityState) public identityState;
+    mapping(address => uint256) public sessionEpoch;
+
     // --- Events ---
     event KeyAuthorized(address indexed key);
     event KeyRevoked(address indexed key);
@@ -85,6 +95,9 @@ abstract contract IdentityStore {
     event RecoverySupported(address indexed oldRoot, address indexed guardian, uint256 approvals);
     event RecoveryCancelled(address indexed oldRoot);
     event RecoveryFinalized(address indexed oldRoot, address indexed newRoot);
+    event IdentityFrozen(address indexed root);
+    event IdentityUnfrozen(address indexed root);
+    event AllSessionsCancelled(address indexed root, uint256 newEpoch);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "not owner");
@@ -158,7 +171,11 @@ abstract contract IdentityStore {
     function _recoverIntentSigner(IntentParams calldata p) internal view returns (address) {
         _validateSigParams(p.v, p.s);
         bytes32 structHash = keccak256(
-            abi.encode(INTENT_TYPEHASH, p.targetContract, p.functionSig, p.maxValue, p.expiration, p.chainId, p.nonce)
+            abi.encode(
+                INTENT_TYPEHASH, p.targetContract, p.functionSig,
+                p.recipient, p.assetAddress, p.callDataHash,
+                p.maxValue, p.expiration, p.chainId, p.nonce
+            )
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
         address signer = ecrecover(digest, p.v, p.r, p.s);
@@ -191,8 +208,9 @@ abstract contract IdentityStore {
     // --- Direct-authorization intent validation ---
 
     function validateIntent(
-        address targetContract, bytes4 functionSig, uint128 maxValue,
-        uint64 expiration, uint64 intentChainId, uint64 nonce,
+        address targetContract, bytes4 functionSig,
+        address recipient, address assetAddress, bytes32 dataHash,
+        uint128 maxValue, uint64 expiration, uint64 intentChainId, uint64 nonce,
         uint8 v, bytes32 r, bytes32 s
     ) external payable {
         require(block.timestamp <= expiration, "intent expired");
@@ -200,7 +218,11 @@ abstract contract IdentityStore {
         _validateSigParams(v, s);
 
         bytes32 structHash = keccak256(
-            abi.encode(INTENT_TYPEHASH, targetContract, functionSig, maxValue, expiration, intentChainId, nonce)
+            abi.encode(
+                INTENT_TYPEHASH, targetContract, functionSig,
+                recipient, assetAddress, dataHash,
+                maxValue, expiration, intentChainId, nonce
+            )
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
 
@@ -250,6 +272,25 @@ abstract contract IdentityStore {
 
     function gatedPurchase(address, uint128) external gatedFunction {}
 
+    // --- Identity State Management ---
+
+    function freezeIdentity(address root) external onlyOwner {
+        identityState[root] = IdentityState.Frozen;
+        emit IdentityFrozen(root);
+    }
+
+    function unfreezeIdentity(address root) external onlyOwner {
+        require(identityState[root] == IdentityState.Frozen, "not frozen");
+        identityState[root] = IdentityState.Active;
+        emit IdentityUnfrozen(root);
+    }
+
+    function cancelAllSessions(address root) external {
+        require(msg.sender == root || msg.sender == owner, "not authorized");
+        sessionEpoch[root]++;
+        emit AllSessionsCancelled(root, sessionEpoch[root]);
+    }
+
     // --- Social Recovery ---
 
     function initiateRecovery(address oldRoot, address newRoot, uint8 v, bytes32 r, bytes32 s) external {
@@ -263,6 +304,7 @@ abstract contract IdentityStore {
         pendingNewRoot[oldRoot] = newRoot;
         recoveryApprovals[oldRoot] = 1;
         recoveryApproved[oldRoot][guardian] = true;
+        identityState[oldRoot] = IdentityState.RecoveryPending;
 
         emit RecoveryInitiated(oldRoot, newRoot, guardian);
     }
@@ -289,6 +331,7 @@ abstract contract IdentityStore {
         require(msg.sender == oldRoot, "only old root can cancel");
         require(pendingNewRoot[oldRoot] != address(0), "no pending recovery");
         _clearRecovery(oldRoot);
+        identityState[oldRoot] = IdentityState.Active;
         emit RecoveryCancelled(oldRoot);
     }
 
@@ -307,6 +350,8 @@ abstract contract IdentityStore {
         delete _guardians[oldRoot];
         recoveryNonces[oldRoot]++;
         _clearRecovery(oldRoot);
+        identityState[oldRoot] = IdentityState.Active;
+        identityState[newRoot] = IdentityState.Active;
 
         emit RecoveryFinalized(oldRoot, newRoot);
     }

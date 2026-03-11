@@ -139,6 +139,9 @@ impl KeyHierarchy {
 pub struct SovereignIntent {
     pub target_contract: [u8; 20],
     pub function_sig: [u8; 4],
+    pub recipient: [u8; 20],
+    pub asset_address: [u8; 20],
+    pub call_data_hash: [u8; 32],
     pub max_value: u128,
     pub expiration: u64,
     pub chain_id: u64,
@@ -194,7 +197,7 @@ fn address_to_word(addr: &[u8; 20]) -> [u8; 32] {
 const DOMAIN_TYPE_STR: &str =
     "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
 const INTENT_TYPE_STR: &str =
-    "SovereignIntent(address targetContract,bytes4 functionSig,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce)";
+    "SovereignIntent(address targetContract,bytes4 functionSig,address recipient,address assetAddress,bytes32 callDataHash,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce)";
 
 /// Compute the EIP-712 domain separator.
 pub fn domain_separator(chain_id: u64, verifying_contract: &[u8; 20]) -> [u8; 32] {
@@ -215,15 +218,23 @@ pub fn domain_separator(chain_id: u64, verifying_contract: &[u8; 20]) -> [u8; 32
 pub fn intent_struct_hash(intent: &SovereignIntent) -> [u8; 32] {
     let typehash = keccak256(INTENT_TYPE_STR.as_bytes());
 
-    let mut buf = Vec::with_capacity(7 * 32);
+    let mut buf = Vec::with_capacity(10 * 32);
     buf.extend_from_slice(&typehash);
     buf.extend_from_slice(&address_to_word(&intent.target_contract));
     buf.extend_from_slice(&right_pad_32(&intent.function_sig)); // bytes4 right-padded
+    buf.extend_from_slice(&address_to_word(&intent.recipient));
+    buf.extend_from_slice(&address_to_word(&intent.asset_address));
+    buf.extend_from_slice(&intent.call_data_hash); // bytes32 is already 32 bytes
     buf.extend_from_slice(&u128_to_word(intent.max_value));
     buf.extend_from_slice(&u64_to_word(intent.expiration));
     buf.extend_from_slice(&u64_to_word(intent.chain_id));
     buf.extend_from_slice(&u64_to_word(intent.nonce));
     keccak256(&buf)
+}
+
+/// Compute the keccak256 hash of call data for intent binding.
+pub fn call_data_hash(call_data: &[u8]) -> [u8; 32] {
+    keccak256(call_data)
 }
 
 /// Compute the final EIP-712 signing hash for an intent.
@@ -598,27 +609,43 @@ pub struct SignedSession {
     pub s: [u8; 32],
 }
 
-/// Derive an ephemeral one-time-use session key from an action key's private key and a nonce.
-/// The derivation uses keccak256(action_privkey || nonce) as entropy for a new secp256k1 key.
-/// The action_privkey is wrapped in Zeroizing to ensure cleanup.
+/// Derive an ephemeral one-time-use session key using HKDF-SHA256.
+///
+/// IKM: action_privkey (32 bytes)
+/// Salt: domain string "HuntKey-V1-Session-Key"
+/// Info: parent_pubkey (33 bytes compressed) || nonce (8 bytes big-endian)
+///
+/// This ensures global uniqueness: different action keys, different nonces,
+/// or different parent public keys all produce distinct session keys.
+/// All secret material is zeroized after use.
 pub fn derive_session_key(action_privkey: &[u8; 32], nonce: u64) -> SessionKey {
+    use hkdf::Hkdf;
     use k256::ecdsa::SigningKey;
+    use sha2::Sha256;
 
-    let mut key_bytes = Zeroizing::new(*action_privkey);
-    let mut seed_input = Vec::with_capacity(40);
-    seed_input.extend_from_slice(&*key_bytes);
-    seed_input.extend_from_slice(&nonce.to_be_bytes());
-    key_bytes.zeroize();
+    // Derive parent pubkey for info binding
+    let parent_key = SigningKey::from_bytes(action_privkey.into()).expect("invalid action key");
+    let parent_pubkey = parent_key.verifying_key().to_sec1_bytes();
 
-    let mut session_secret = Zeroizing::new(keccak256(&seed_input));
-    // Zero the seed input
-    for b in seed_input.iter_mut() {
+    // Build info: parent_pubkey || nonce
+    let mut info = Vec::with_capacity(parent_pubkey.len() + 8);
+    info.extend_from_slice(&parent_pubkey);
+    info.extend_from_slice(&nonce.to_be_bytes());
+
+    // HKDF extract + expand
+    let salt = b"HuntKey-V1-Session-Key";
+    let hk = Hkdf::<Sha256>::new(Some(salt), action_privkey);
+    let mut okm = Zeroizing::new([0u8; 32]);
+    hk.expand(&info, &mut *okm).expect("HKDF expand failed");
+
+    // Zero the info buffer
+    for b in info.iter_mut() {
         *b = 0;
     }
 
     let signing_key =
-        SigningKey::from_bytes((&*session_secret).into()).expect("invalid session key derivation");
-    session_secret.zeroize();
+        SigningKey::from_bytes((&*okm).into()).expect("invalid session key derivation");
+    okm.zeroize();
 
     let verifying_key = signing_key.verifying_key();
     let addr = eth_address(verifying_key);
@@ -904,7 +931,10 @@ mod sovereign_tests {
         let contract = [0xAA; 20];
         let intent = SovereignIntent {
             target_contract: [0xBB; 20],
-            function_sig: [0xa9, 0x05, 0x9c, 0xbb], // transfer(address,uint256)
+            function_sig: [0xa9, 0x05, 0x9c, 0xbb],
+            recipient: [0x00; 20],
+            asset_address: [0x00; 20],
+            call_data_hash: [0x00; 32],
             max_value: 1_000_000,
             expiration: 1700000000,
             chain_id: 1,
@@ -926,6 +956,9 @@ mod sovereign_tests {
         let intent = SovereignIntent {
             target_contract: [0xDD; 20],
             function_sig: [0xa9, 0x05, 0x9c, 0xbb],
+            recipient: [0x00; 20],
+            asset_address: [0x00; 20],
+            call_data_hash: [0x00; 32],
             max_value: 500_000,
             expiration: 1800000000,
             chain_id: 1,
@@ -1049,6 +1082,9 @@ mod sovereign_tests {
         let intent = SovereignIntent {
             target_contract: [0xDD; 20],
             function_sig: fn_sig,
+            recipient: [0x00; 20],
+            asset_address: [0x00; 20],
+            call_data_hash: [0x00; 32],
             max_value: 1_000_000_000_000_000_000, // 1 ETH (within 2 ETH cap)
             expiration: 1800000000,
             chain_id: 1,
@@ -1222,6 +1258,9 @@ mod sovereign_tests {
             let intent = SovereignIntent {
                 target_contract: [0x22; 20],
                 function_sig: [0xa9, 0x05, 0x9c, 0xbb],
+                recipient: [0x00; 20],
+                asset_address: [0x00; 20],
+                call_data_hash: [0x00; 32],
                 max_value: max_val,
                 expiration: exp,
                 chain_id: 1,
@@ -1410,6 +1449,9 @@ mod sovereign_tests {
         let intent = SovereignIntent {
             target_contract: target,
             function_sig: fn_sig,
+            recipient: [0x00; 20],
+            asset_address: [0x00; 20],
+            call_data_hash: [0x00; 32],
             max_value: 1_000_000,
             expiration: 1800000000,
             chain_id: 1,
