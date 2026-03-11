@@ -3,6 +3,10 @@ pragma solidity ^0.8.28;
 
 /// @title SignatureVerifier — ECDSA signature verifier for BIP-44 derived Ethereum keys
 contract SignatureVerifier {
+    /// @dev Half of the secp256k1 curve order — reject s values above this to prevent malleability.
+    uint256 private constant SECP256K1_N_DIV_2 =
+        0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
+
     /// @notice Verify that a message was signed by the expected address.
     /// @param signer   Expected signer address (from BIP-44 derivation)
     /// @param message  The original message that was signed
@@ -17,6 +21,9 @@ contract SignatureVerifier {
         bytes32 r,
         bytes32 s
     ) external pure returns (bool valid) {
+        require(v == 27 || v == 28, "invalid v value");
+        require(uint256(s) <= SECP256K1_N_DIV_2, "malleable signature: s too high");
+
         bytes32 hash = keccak256(
             abi.encodePacked(
                 "\x19Ethereum Signed Message:\n",
@@ -24,7 +31,10 @@ contract SignatureVerifier {
                 message
             )
         );
-        return ecrecover(hash, v, r, s) == signer;
+
+        address recovered = ecrecover(hash, v, r, s);
+        require(recovered != address(0), "ecrecover failed");
+        return recovered == signer;
     }
 
     /// @notice Convert uint to decimal string (for EIP-191 prefix).
