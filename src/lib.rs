@@ -412,6 +412,313 @@ pub fn recover_delegator(
     eth_address(&recovered)
 }
 
+// ---------------------------------------------------------------------------
+// Sovereign Identity Protocol — Social Recovery
+// ---------------------------------------------------------------------------
+
+const RECOVERY_TYPE_STR: &str =
+    "RecoveryRequest(address oldRoot,address newRoot,uint64 chainId,uint64 nonce)";
+
+/// A recovery request to migrate identity from one root to another.
+/// Guardians sign this off-chain; the contract enforces threshold + timelock.
+#[derive(Debug, Clone)]
+pub struct RecoveryRequest {
+    pub old_root: [u8; 20],
+    pub new_root: [u8; 20],
+    pub chain_id: u64,
+    pub nonce: u64,
+}
+
+/// Tracks the local state of a pending recovery for alerting the user.
+#[derive(Debug, Clone)]
+pub struct PendingRecovery {
+    pub request: RecoveryRequest,
+    /// Guardian addresses that have approved so far.
+    pub approvals: Vec<[u8; 20]>,
+    /// Timestamp when the threshold was met and timelock started (None if still gathering).
+    pub initiated_at: Option<u64>,
+}
+
+impl PendingRecovery {
+    pub fn new(request: RecoveryRequest) -> Self {
+        Self {
+            request,
+            approvals: Vec::new(),
+            initiated_at: None,
+        }
+    }
+
+    /// Record a guardian approval. Returns true if this is a new approval.
+    pub fn add_approval(&mut self, guardian: [u8; 20]) -> bool {
+        if self.approvals.contains(&guardian) {
+            return false;
+        }
+        self.approvals.push(guardian);
+        true
+    }
+
+    /// Check if the threshold has been met.
+    pub fn threshold_met(&self, threshold: usize) -> bool {
+        self.approvals.len() >= threshold
+    }
+
+    /// Check if this recovery is an alert (someone initiated recovery on our root).
+    pub fn is_alert(&self, our_root: &[u8; 20]) -> bool {
+        self.request.old_root == *our_root
+    }
+
+    /// Check if the timelock has expired (48 hours = 172800 seconds).
+    pub fn timelock_expired(&self, current_time: u64) -> bool {
+        match self.initiated_at {
+            Some(t) => current_time >= t + 172800,
+            None => false,
+        }
+    }
+}
+
+/// Compute the EIP-712 struct hash of a RecoveryRequest.
+pub fn recovery_struct_hash(req: &RecoveryRequest) -> [u8; 32] {
+    let typehash = keccak256(RECOVERY_TYPE_STR.as_bytes());
+
+    let mut buf = Vec::with_capacity(5 * 32);
+    buf.extend_from_slice(&typehash);
+    buf.extend_from_slice(&address_to_word(&req.old_root));
+    buf.extend_from_slice(&address_to_word(&req.new_root));
+    buf.extend_from_slice(&u64_to_word(req.chain_id));
+    buf.extend_from_slice(&u64_to_word(req.nonce));
+    keccak256(&buf)
+}
+
+/// Compute the EIP-712 signing hash for a recovery request.
+pub fn recovery_signing_hash(
+    req: &RecoveryRequest,
+    verifying_contract: &[u8; 20],
+) -> [u8; 32] {
+    let ds = domain_separator(req.chain_id, verifying_contract);
+    let sh = recovery_struct_hash(req);
+
+    let mut buf = Vec::with_capacity(2 + 32 + 32);
+    buf.extend_from_slice(&[0x19, 0x01]);
+    buf.extend_from_slice(&ds);
+    buf.extend_from_slice(&sh);
+    keccak256(&buf)
+}
+
+/// Sign a RecoveryRequest with a guardian's private key.
+/// The guardian_private_key bytes are zeroized after use.
+pub fn sign_recovery_request(
+    req: &RecoveryRequest,
+    verifying_contract: &[u8; 20],
+    guardian_private_key: &[u8; 32],
+) -> IntentSignature {
+    use k256::ecdsa::SigningKey;
+
+    let hash = recovery_signing_hash(req, verifying_contract);
+
+    let mut key_bytes = Zeroizing::new(*guardian_private_key);
+    let signing_key = SigningKey::from_bytes((&*key_bytes).into()).expect("invalid private key");
+    key_bytes.zeroize();
+
+    let (sig, recid) = signing_key
+        .sign_prehash_recoverable(&hash)
+        .expect("signing failed");
+
+    let bytes = sig.to_bytes();
+    let mut r = [0u8; 32];
+    let mut s = [0u8; 32];
+    r.copy_from_slice(&bytes[..32]);
+    s.copy_from_slice(&bytes[32..]);
+
+    IntentSignature {
+        v: recid.to_byte() + 27,
+        r,
+        s,
+    }
+}
+
+/// Recover the guardian address from a signed recovery request.
+pub fn recover_recovery_signer(
+    req: &RecoveryRequest,
+    verifying_contract: &[u8; 20],
+    sig: &IntentSignature,
+) -> [u8; 20] {
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+
+    let hash = recovery_signing_hash(req, verifying_contract);
+
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(&sig.r);
+    sig_bytes[32..].copy_from_slice(&sig.s);
+
+    let signature = Signature::from_bytes((&sig_bytes).into()).expect("invalid signature");
+    let recid = RecoveryId::from_byte(sig.v - 27).expect("invalid recovery id");
+
+    let recovered =
+        VerifyingKey::recover_from_prehash(&hash, &signature, recid).expect("recovery failed");
+
+    eth_address(&recovered)
+}
+
+// ---------------------------------------------------------------------------
+// Sovereign Identity Protocol — Ephemeral Session Keys
+// ---------------------------------------------------------------------------
+
+const SESSION_TYPE_STR: &str =
+    "SessionCertificate(address session,address parent,bytes4 scope,address target,uint128 maxValue,uint64 expiration,uint64 chainId)";
+
+/// An ephemeral session key derived from an action key + nonce.
+/// All secret material is zeroed on drop.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct SessionKey {
+    pub private_key: [u8; 32],
+    #[zeroize(skip)]
+    pub public_key: Vec<u8>,
+    #[zeroize(skip)]
+    pub eth_address: [u8; 20],
+}
+
+/// A session certificate that links an ephemeral session key to its parent action key.
+#[derive(Debug, Clone)]
+pub struct SessionCertificate {
+    pub session: [u8; 20],
+    pub parent: [u8; 20],
+    pub scope: [u8; 4],
+    pub target: [u8; 20],
+    pub max_value: u128,
+    pub expiration: u64,
+    pub chain_id: u64,
+}
+
+/// Signed session certificate.
+#[derive(Debug, Clone)]
+pub struct SignedSession {
+    pub certificate: SessionCertificate,
+    pub v: u8,
+    pub r: [u8; 32],
+    pub s: [u8; 32],
+}
+
+/// Derive an ephemeral one-time-use session key from an action key's private key and a nonce.
+/// The derivation uses keccak256(action_privkey || nonce) as entropy for a new secp256k1 key.
+/// The action_privkey is wrapped in Zeroizing to ensure cleanup.
+pub fn derive_session_key(action_privkey: &[u8; 32], nonce: u64) -> SessionKey {
+    use k256::ecdsa::SigningKey;
+
+    let mut key_bytes = Zeroizing::new(*action_privkey);
+    let mut seed_input = Vec::with_capacity(40);
+    seed_input.extend_from_slice(&*key_bytes);
+    seed_input.extend_from_slice(&nonce.to_be_bytes());
+    key_bytes.zeroize();
+
+    let mut session_secret = Zeroizing::new(keccak256(&seed_input));
+    // Zero the seed input
+    for b in seed_input.iter_mut() {
+        *b = 0;
+    }
+
+    let signing_key =
+        SigningKey::from_bytes((&*session_secret).into()).expect("invalid session key derivation");
+    session_secret.zeroize();
+
+    let verifying_key = signing_key.verifying_key();
+    let addr = eth_address(verifying_key);
+
+    SessionKey {
+        private_key: signing_key.to_bytes().into(),
+        public_key: verifying_key.to_sec1_bytes().to_vec(),
+        eth_address: addr,
+    }
+}
+
+/// Compute the EIP-712 struct hash of a SessionCertificate.
+pub fn session_struct_hash(cert: &SessionCertificate) -> [u8; 32] {
+    let typehash = keccak256(SESSION_TYPE_STR.as_bytes());
+
+    let mut buf = Vec::with_capacity(8 * 32);
+    buf.extend_from_slice(&typehash);
+    buf.extend_from_slice(&address_to_word(&cert.session));
+    buf.extend_from_slice(&address_to_word(&cert.parent));
+    buf.extend_from_slice(&right_pad_32(&cert.scope)); // bytes4 right-padded
+    buf.extend_from_slice(&address_to_word(&cert.target));
+    buf.extend_from_slice(&u128_to_word(cert.max_value));
+    buf.extend_from_slice(&u64_to_word(cert.expiration));
+    buf.extend_from_slice(&u64_to_word(cert.chain_id));
+    keccak256(&buf)
+}
+
+/// Compute the EIP-712 signing hash for a session certificate.
+pub fn session_signing_hash(
+    cert: &SessionCertificate,
+    verifying_contract: &[u8; 20],
+) -> [u8; 32] {
+    let ds = domain_separator(cert.chain_id, verifying_contract);
+    let sh = session_struct_hash(cert);
+
+    let mut buf = Vec::with_capacity(2 + 32 + 32);
+    buf.extend_from_slice(&[0x19, 0x01]);
+    buf.extend_from_slice(&ds);
+    buf.extend_from_slice(&sh);
+    keccak256(&buf)
+}
+
+/// Sign a SessionCertificate with the parent action key's private key.
+/// The action_privkey is zeroized after use.
+pub fn sign_session_cert(
+    cert: &SessionCertificate,
+    verifying_contract: &[u8; 20],
+    action_privkey: &[u8; 32],
+) -> SignedSession {
+    use k256::ecdsa::SigningKey;
+
+    let hash = session_signing_hash(cert, verifying_contract);
+
+    let mut key_bytes = Zeroizing::new(*action_privkey);
+    let signing_key = SigningKey::from_bytes((&*key_bytes).into()).expect("invalid private key");
+    key_bytes.zeroize();
+
+    let (sig, recid) = signing_key
+        .sign_prehash_recoverable(&hash)
+        .expect("signing failed");
+
+    let bytes = sig.to_bytes();
+    let mut r = [0u8; 32];
+    let mut s = [0u8; 32];
+    r.copy_from_slice(&bytes[..32]);
+    s.copy_from_slice(&bytes[32..]);
+
+    SignedSession {
+        certificate: cert.clone(),
+        v: recid.to_byte() + 27,
+        r,
+        s,
+    }
+}
+
+/// Recover the signer (parent action key) of a signed session certificate.
+pub fn recover_session_signer(
+    cert: &SessionCertificate,
+    verifying_contract: &[u8; 20],
+    v: u8,
+    r: &[u8; 32],
+    s: &[u8; 32],
+) -> [u8; 20] {
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+
+    let hash = session_signing_hash(cert, verifying_contract);
+
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(r);
+    sig_bytes[32..].copy_from_slice(s);
+
+    let signature = Signature::from_bytes((&sig_bytes).into()).expect("invalid signature");
+    let recid = RecoveryId::from_byte(v - 27).expect("invalid recovery id");
+
+    let recovered =
+        VerifyingKey::recover_from_prehash(&hash, &signature, recid).expect("recovery failed");
+
+    eth_address(&recovered)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -758,6 +1065,148 @@ mod sovereign_tests {
         assert_eq!(signed_deleg.certificate.delegate, recovered_action);
     }
 
+    #[test]
+    fn test_recovery_request_sign_and_recover() {
+        let root = test_root();
+        let hierarchy = KeyHierarchy::new(root);
+        // Use recovery key #0 as a "guardian"
+        let guardian = hierarchy.derive_role(KeyRole::Recovery, 0);
+
+        let verifying_contract = [0xCC; 20];
+        let req = RecoveryRequest {
+            old_root: [0xAA; 20],
+            new_root: [0xBB; 20],
+            chain_id: 1,
+            nonce: 0,
+        };
+
+        let guardian_privkey: [u8; 32] = guardian.private_key.as_slice().try_into().unwrap();
+        let sig = sign_recovery_request(&req, &verifying_contract, &guardian_privkey);
+
+        let recovered = recover_recovery_signer(&req, &verifying_contract, &sig);
+        assert_eq!(recovered, guardian.eth_address.unwrap());
+    }
+
+    #[test]
+    fn test_recovery_hash_chain_id_binding() {
+        let contract = [0xAA; 20];
+        let req1 = RecoveryRequest {
+            old_root: [0xBB; 20],
+            new_root: [0xCC; 20],
+            chain_id: 1,
+            nonce: 0,
+        };
+        let req2 = RecoveryRequest {
+            chain_id: 137,
+            ..req1.clone()
+        };
+
+        let h1 = recovery_signing_hash(&req1, &contract);
+        let h2 = recovery_signing_hash(&req2, &contract);
+        assert_ne!(h1, h2, "different chain_ids must produce different recovery hashes");
+    }
+
+    #[test]
+    fn test_recovery_hash_nonce_binding() {
+        let contract = [0xAA; 20];
+        let req1 = RecoveryRequest {
+            old_root: [0xBB; 20],
+            new_root: [0xCC; 20],
+            chain_id: 1,
+            nonce: 0,
+        };
+        let req2 = RecoveryRequest {
+            nonce: 1,
+            ..req1.clone()
+        };
+
+        let h1 = recovery_signing_hash(&req1, &contract);
+        let h2 = recovery_signing_hash(&req2, &contract);
+        assert_ne!(h1, h2, "different nonces must produce different recovery hashes");
+    }
+
+    #[test]
+    fn test_pending_recovery_tracking() {
+        let our_root = [0xAA; 20];
+        let new_root = [0xBB; 20];
+        let req = RecoveryRequest {
+            old_root: our_root,
+            new_root,
+            chain_id: 1,
+            nonce: 0,
+        };
+
+        let mut pending = PendingRecovery::new(req);
+        assert!(pending.is_alert(&our_root));
+        assert!(!pending.threshold_met(2));
+        assert!(!pending.timelock_expired(1000));
+
+        // Add first guardian approval
+        let g1 = [0x11; 20];
+        assert!(pending.add_approval(g1));
+        assert!(!pending.threshold_met(2));
+
+        // Duplicate approval rejected
+        assert!(!pending.add_approval(g1));
+
+        // Second guardian reaches threshold
+        let g2 = [0x22; 20];
+        assert!(pending.add_approval(g2));
+        assert!(pending.threshold_met(2));
+
+        // Simulate timelock start
+        pending.initiated_at = Some(1000);
+        assert!(!pending.timelock_expired(1000 + 172799)); // 1 second before
+        assert!(pending.timelock_expired(1000 + 172800));  // exactly 48h
+    }
+
+    #[test]
+    fn test_full_recovery_flow() {
+        // Simulate: root is lost, 2 of 3 guardians initiate recovery, sign the request
+        let root = test_root();
+        let hierarchy = KeyHierarchy::new(root);
+
+        let old_root_id = hierarchy.derive_role(KeyRole::RootIdentity, 0);
+        let guardian_0 = hierarchy.derive_role(KeyRole::Recovery, 0);
+        let guardian_1 = hierarchy.derive_role(KeyRole::Recovery, 1);
+
+        // New identity from a different mnemonic
+        let new_mnemonic = Mnemonic::from_str(
+            "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong",
+        ).unwrap();
+        let new_hierarchy = KeyHierarchy::new(root_from_mnemonic(&new_mnemonic));
+        let new_root_id = new_hierarchy.derive_role(KeyRole::RootIdentity, 0);
+
+        let verifying_contract = [0xCC; 20];
+        let req = RecoveryRequest {
+            old_root: old_root_id.eth_address.unwrap(),
+            new_root: new_root_id.eth_address.unwrap(),
+            chain_id: 1,
+            nonce: 0,
+        };
+
+        // Guardian 0 signs
+        let g0_privkey: [u8; 32] = guardian_0.private_key.as_slice().try_into().unwrap();
+        let g0_sig = sign_recovery_request(&req, &verifying_contract, &g0_privkey);
+        let g0_recovered = recover_recovery_signer(&req, &verifying_contract, &g0_sig);
+        assert_eq!(g0_recovered, guardian_0.eth_address.unwrap());
+
+        // Guardian 1 signs
+        let g1_privkey: [u8; 32] = guardian_1.private_key.as_slice().try_into().unwrap();
+        let g1_sig = sign_recovery_request(&req, &verifying_contract, &g1_privkey);
+        let g1_recovered = recover_recovery_signer(&req, &verifying_contract, &g1_sig);
+        assert_eq!(g1_recovered, guardian_1.eth_address.unwrap());
+
+        // Different guardians signed
+        assert_ne!(g0_recovered, g1_recovered);
+
+        // Track locally
+        let mut pending = PendingRecovery::new(req);
+        pending.add_approval(g0_recovered);
+        pending.add_approval(g1_recovered);
+        assert!(pending.threshold_met(2));
+    }
+
     proptest! {
         #[test]
         fn prop_random_intents_produce_recoverable_signatures(
@@ -814,5 +1263,192 @@ mod sovereign_tests {
             );
             prop_assert_eq!(recovered, root_id.eth_address.unwrap());
         }
+
+        #[test]
+        fn prop_recovery_always_recoverable(
+            nonce in 0u64..10000u64,
+        ) {
+            let root = test_root();
+            let hierarchy = KeyHierarchy::new(root);
+            let guardian = hierarchy.derive_role(KeyRole::Recovery, 0);
+
+            let verifying_contract = [0x11; 20];
+            let req = RecoveryRequest {
+                old_root: [0xAA; 20],
+                new_root: [0xBB; 20],
+                chain_id: 1,
+                nonce,
+            };
+
+            let guardian_privkey: [u8; 32] = guardian.private_key.as_slice().try_into().unwrap();
+            let sig = sign_recovery_request(&req, &verifying_contract, &guardian_privkey);
+            let recovered = recover_recovery_signer(&req, &verifying_contract, &sig);
+            prop_assert_eq!(recovered, guardian.eth_address.unwrap());
+        }
+
+        #[test]
+        fn prop_session_cert_always_recoverable(
+            nonce in 0u64..10000u64,
+        ) {
+            let root = test_root();
+            let hierarchy = KeyHierarchy::new(root);
+            let action_key = hierarchy.derive_role(KeyRole::Action, 0);
+
+            let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
+            let session = derive_session_key(&action_privkey, nonce);
+
+            let verifying_contract = [0x11; 20];
+            let cert = SessionCertificate {
+                session: session.eth_address,
+                parent: action_key.eth_address.unwrap(),
+                scope: [0xa9, 0x05, 0x9c, 0xbb],
+                target: [0xDD; 20],
+                max_value: 1_000_000,
+                expiration: 1900000000,
+                chain_id: 1,
+            };
+
+            let signed = sign_session_cert(&cert, &verifying_contract, &action_privkey);
+            let recovered = recover_session_signer(
+                &signed.certificate, &verifying_contract,
+                signed.v, &signed.r, &signed.s,
+            );
+            prop_assert_eq!(recovered, action_key.eth_address.unwrap());
+        }
+    }
+
+    // --- Session key tests ---
+
+    #[test]
+    fn test_derive_session_key_deterministic() {
+        let root = test_root();
+        let hierarchy = KeyHierarchy::new(root);
+        let action_key = hierarchy.derive_role(KeyRole::Action, 0);
+        let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
+
+        let s1 = derive_session_key(&action_privkey, 0);
+        let s2 = derive_session_key(&action_privkey, 0);
+        assert_eq!(s1.eth_address, s2.eth_address);
+        assert_eq!(s1.private_key, s2.private_key);
+    }
+
+    #[test]
+    fn test_derive_session_key_different_nonces() {
+        let root = test_root();
+        let hierarchy = KeyHierarchy::new(root);
+        let action_key = hierarchy.derive_role(KeyRole::Action, 0);
+        let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
+
+        let s0 = derive_session_key(&action_privkey, 0);
+        let s1 = derive_session_key(&action_privkey, 1);
+        let s2 = derive_session_key(&action_privkey, 2);
+
+        assert_ne!(s0.eth_address, s1.eth_address);
+        assert_ne!(s1.eth_address, s2.eth_address);
+        assert_ne!(s0.eth_address, s2.eth_address);
+    }
+
+    #[test]
+    fn test_session_cert_sign_and_recover() {
+        let root = test_root();
+        let hierarchy = KeyHierarchy::new(root);
+        let action_key = hierarchy.derive_role(KeyRole::Action, 0);
+        let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
+
+        let session = derive_session_key(&action_privkey, 0);
+
+        let verifying_contract = [0xCC; 20];
+        let cert = SessionCertificate {
+            session: session.eth_address,
+            parent: action_key.eth_address.unwrap(),
+            scope: [0xa9, 0x05, 0x9c, 0xbb],
+            target: [0xDD; 20],
+            max_value: 1_000_000,
+            expiration: 1900000000,
+            chain_id: 1,
+        };
+
+        let signed = sign_session_cert(&cert, &verifying_contract, &action_privkey);
+        let recovered = recover_session_signer(
+            &signed.certificate,
+            &verifying_contract,
+            signed.v,
+            &signed.r,
+            &signed.s,
+        );
+        assert_eq!(recovered, action_key.eth_address.unwrap());
+    }
+
+    #[test]
+    fn test_session_key_signs_intent() {
+        // Full 3-layer chain: Root → Action → Session → Intent
+        let root = test_root();
+        let hierarchy = KeyHierarchy::new(root);
+        let action_key = hierarchy.derive_role(KeyRole::Action, 0);
+        let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
+
+        // Derive session key
+        let session = derive_session_key(&action_privkey, 42);
+
+        let verifying_contract = [0xCC; 20];
+        let fn_sig = [0xa9, 0x05, 0x9c, 0xbb];
+        let target = [0xDD; 20];
+
+        // Action key signs session certificate
+        let cert = SessionCertificate {
+            session: session.eth_address,
+            parent: action_key.eth_address.unwrap(),
+            scope: fn_sig,
+            target,
+            max_value: 2_000_000,
+            expiration: 1900000000,
+            chain_id: 1,
+        };
+        let signed_session = sign_session_cert(&cert, &verifying_contract, &action_privkey);
+
+        // Session key signs intent
+        let intent = SovereignIntent {
+            target_contract: target,
+            function_sig: fn_sig,
+            max_value: 1_000_000,
+            expiration: 1800000000,
+            chain_id: 1,
+            nonce: 0,
+        };
+        let intent_sig = sign_intent(&intent, &verifying_contract, &session.private_key);
+
+        // Verify chain
+        let recovered_parent = recover_session_signer(
+            &signed_session.certificate,
+            &verifying_contract,
+            signed_session.v,
+            &signed_session.r,
+            &signed_session.s,
+        );
+        assert_eq!(recovered_parent, action_key.eth_address.unwrap());
+
+        let recovered_session = recover_signer(&intent, &verifying_contract, &intent_sig);
+        assert_eq!(recovered_session, session.eth_address);
+
+        // Session address in cert matches intent signer
+        assert_eq!(signed_session.certificate.session, recovered_session);
+    }
+
+    #[test]
+    fn test_session_hash_deterministic() {
+        let contract = [0xAA; 20];
+        let cert = SessionCertificate {
+            session: [0xBB; 20],
+            parent: [0xCC; 20],
+            scope: [0xa9, 0x05, 0x9c, 0xbb],
+            target: [0xDD; 20],
+            max_value: 500_000,
+            expiration: 1800000000,
+            chain_id: 1,
+        };
+
+        let h1 = session_signing_hash(&cert, &contract);
+        let h2 = session_signing_hash(&cert, &contract);
+        assert_eq!(h1, h2);
     }
 }
