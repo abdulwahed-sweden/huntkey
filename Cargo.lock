@@ -400,6 +400,7 @@ dependencies = [
  "bip39",
  "coins-bip32",
  "hex",
+ "k256",
  "proptest",
  "tiny-keccak",
  "zeroize",
