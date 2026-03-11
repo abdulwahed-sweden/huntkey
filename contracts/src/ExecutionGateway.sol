@@ -7,6 +7,22 @@ import {IdentityStore} from "./IdentityStore.sol";
 /// @notice Inherits IdentityStore for identity state and adds session-key-based execution.
 ///         Flow: Root authorizes Action Key → Action Key signs SessionCertificate → Session Key signs Intent → execute()
 contract ExecutionGateway is IdentityStore {
+    // --- Custom errors ---
+    error IdentityNotActive();
+    error SessionExpired();
+    error SessionChainMismatch();
+    error SessionParentNotAuthorized();
+    error SignerNotDeclaredParent();
+    error SessionKeyAlreadyUsed();
+    error IntentNotSignedBySessionKey();
+    error IntentScopeMismatch();
+    error IntentTargetMismatch();
+    error CallTargetMismatch();
+    error CalldataTooShort();
+    error SelectorMismatch();
+    error CalldataHashMismatch();
+    error IntentExceedsSessionCap();
+
     // --- Session EIP-712 constant ---
     bytes32 public constant SESSION_TYPEHASH =
         keccak256(
@@ -60,7 +76,7 @@ contract ExecutionGateway is IdentityStore {
         );
 
         address signer = ecrecover(digest, p.v, p.r, p.s);
-        require(signer != address(0), "session ecrecover failed");
+        if (signer == address(0)) revert EcrecoverFailed();
         return signer;
     }
 
@@ -76,39 +92,39 @@ contract ExecutionGateway is IdentityStore {
         bytes calldata callData
     ) external payable {
         // --- Identity state check ---
-        require(identityState[session.parent] == IdentityState.Active, "identity not active");
+        if (identityState[session.parent] != IdentityState.Active) revert IdentityNotActive();
 
         // --- Layer 1: Validate session certificate ---
-        require(block.timestamp <= session.expiration, "session expired");
-        require(session.chainId == uint64(block.chainid), "session chain mismatch");
+        if (block.timestamp > session.expiration) revert SessionExpired();
+        if (session.chainId != uint64(block.chainid)) revert SessionChainMismatch();
 
         address sessionSigner = _recoverSessionSigner(session);
-        require(authorizedKeys[sessionSigner], "session parent not authorized");
-        require(sessionSigner == session.parent, "signer is not declared parent");
+        if (!authorizedKeys[sessionSigner]) revert SessionParentNotAuthorized();
+        if (sessionSigner != session.parent) revert SignerNotDeclaredParent();
 
         // --- One-time use enforcement ---
-        require(!usedSessionKeys[session.session], "session key already used");
+        if (usedSessionKeys[session.session]) revert SessionKeyAlreadyUsed();
         usedSessionKeys[session.session] = true;
 
         // --- Layer 2: Validate intent signed by session key ---
-        require(block.timestamp <= intent.expiration, "intent expired");
-        require(msg.value <= intent.maxValue, "value exceeds cap");
+        if (block.timestamp > intent.expiration) revert IntentExpired();
+        if (msg.value > intent.maxValue) revert ValueExceedsCap();
 
         address intentSigner = _recoverIntentSigner(intent);
-        require(intentSigner == session.session, "intent not signed by session key");
+        if (intentSigner != session.session) revert IntentNotSignedBySessionKey();
 
         // --- Layer 3: Scope enforcement ---
-        require(intent.functionSig == session.scope, "intent scope mismatch");
-        require(intent.targetContract == session.target, "intent target mismatch");
-        require(target == intent.targetContract, "call target mismatch");
-        require(callData.length >= 4, "calldata too short");
-        require(bytes4(callData[:4]) == intent.functionSig, "selector mismatch");
+        if (intent.functionSig != session.scope) revert IntentScopeMismatch();
+        if (intent.targetContract != session.target) revert IntentTargetMismatch();
+        if (target != intent.targetContract) revert CallTargetMismatch();
+        if (callData.length < 4) revert CalldataTooShort();
+        if (bytes4(callData[:4]) != intent.functionSig) revert SelectorMismatch();
 
         // --- CallData hash verification ---
-        require(keccak256(callData) == intent.callDataHash, "calldata hash mismatch");
+        if (keccak256(callData) != intent.callDataHash) revert CalldataHashMismatch();
 
         // --- Value bounds from session certificate ---
-        require(intent.maxValue <= session.maxValue, "intent exceeds session cap");
+        if (intent.maxValue > session.maxValue) revert IntentExceedsSessionCap();
 
         // --- Forward the call ---
         (bool success, bytes memory returnData) = target.call{value: msg.value}(callData);
@@ -120,5 +136,6 @@ contract ExecutionGateway is IdentityStore {
         }
 
         emit Executed(session.session, target, intent.functionSig, uint128(msg.value), success);
+        emit IntentExecuted(session.parent, session.session, intent.functionSig);
     }
 }

@@ -12,6 +12,13 @@ sha2 = "0.10"
 hex = "0.4"
 tiny-keccak = { version = "2.0", features = ["keccak"] }
 zeroize = { version = "1", features = ["derive"] }
+wasm-bindgen = { version = "0.2", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[features]
+default = []
+wasm = ["wasm-bindgen", "serde", "serde_json"]
 
 [dev-dependencies]
 proptest = "1"

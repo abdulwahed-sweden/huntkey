@@ -6,6 +6,36 @@ abstract contract IdentityStore {
     // --- Identity state enum ---
     enum IdentityState { Active, RecoveryPending, Frozen }
 
+    // --- Custom errors ---
+    error NotOwner();
+    error InvalidGuardianCount();
+    error MalleableSignature();
+    error InvalidVValue();
+    error EcrecoverFailed();
+    error IntentExpired();
+    error ValueExceedsCap();
+    error UnauthorizedKey();
+    error InvalidNonce();
+    error DelegationRequired();
+    error DelegationExpired();
+    error UnregisteredProver();
+    error InvalidDelegationNonce();
+    error SignerNotDelegate();
+    error ScopeMismatch();
+    error ExceedsDelegationCap();
+    error NotFrozen();
+    error NotAuthorized();
+    error OldRootNotRegistered();
+    error InvalidNewRoot();
+    error RecoveryAlreadyPending();
+    error NotAGuardian();
+    error NoPendingRecovery();
+    error AlreadyApproved();
+    error OnlyOldRootCanCancel();
+    error ThresholdNotMet();
+    error TimelockNotStarted();
+    error TimelockNotExpired();
+
     // --- EIP-712 constants ---
     bytes32 public constant INTENT_TYPEHASH =
         keccak256(
@@ -99,8 +129,14 @@ abstract contract IdentityStore {
     event IdentityUnfrozen(address indexed root);
     event AllSessionsCancelled(address indexed root, uint256 newEpoch);
 
+    // --- v1.1 Events ---
+    event IntentExecuted(address indexed root, address indexed sessionKey, bytes4 selector);
+    event SessionInvalidated(address indexed root, uint256 newEpoch);
+    event RecoveryStateChanged(address indexed root, IdentityState newState);
+    event DelegationEndorsed(address indexed root, address indexed delegate, bytes4 scope);
+
     modifier onlyOwner() {
-        require(msg.sender == owner, "not owner");
+        if (msg.sender != owner) revert NotOwner();
         _;
     }
 
@@ -144,7 +180,7 @@ abstract contract IdentityStore {
     // --- Guardian management ---
 
     function setGuardians(address root, address[] calldata guardianList) external onlyOwner {
-        require(guardianList.length >= 3 && guardianList.length <= 5, "need 3-5 guardians");
+        if (guardianList.length < 3 || guardianList.length > 5) revert InvalidGuardianCount();
         _guardians[root] = guardianList;
         emit GuardiansSet(root, guardianList.length);
     }
@@ -164,8 +200,8 @@ abstract contract IdentityStore {
     // --- Signature helpers ---
 
     function _validateSigParams(uint8 v, bytes32 s) internal pure {
-        require(uint256(s) <= SECP256K1_N_DIV_2, "malleable signature: s too high");
-        require(v == 27 || v == 28, "invalid v value");
+        if (uint256(s) > SECP256K1_N_DIV_2) revert MalleableSignature();
+        if (v != 27 && v != 28) revert InvalidVValue();
     }
 
     function _recoverIntentSigner(IntentParams calldata p) internal view returns (address) {
@@ -179,7 +215,7 @@ abstract contract IdentityStore {
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
         address signer = ecrecover(digest, p.v, p.r, p.s);
-        require(signer != address(0), "ecrecover failed");
+        if (signer == address(0)) revert EcrecoverFailed();
         return signer;
     }
 
@@ -190,7 +226,7 @@ abstract contract IdentityStore {
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
         address prover = ecrecover(digest, d.v, d.r, d.s);
-        require(prover != address(0), "delegation ecrecover failed");
+        if (prover == address(0)) revert EcrecoverFailed();
         return prover;
     }
 
@@ -201,7 +237,7 @@ abstract contract IdentityStore {
         bytes32 structHash = keccak256(abi.encode(RECOVERY_TYPEHASH, oldRoot, newRoot, chainId, nonce));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
         address signer = ecrecover(digest, v, r, s);
-        require(signer != address(0), "recovery ecrecover failed");
+        if (signer == address(0)) revert EcrecoverFailed();
         return signer;
     }
 
@@ -213,8 +249,8 @@ abstract contract IdentityStore {
         uint128 maxValue, uint64 expiration, uint64 intentChainId, uint64 nonce,
         uint8 v, bytes32 r, bytes32 s
     ) external payable {
-        require(block.timestamp <= expiration, "intent expired");
-        require(msg.value <= maxValue, "value exceeds cap");
+        if (block.timestamp > expiration) revert IntentExpired();
+        if (msg.value > maxValue) revert ValueExceedsCap();
         _validateSigParams(v, s);
 
         bytes32 structHash = keccak256(
@@ -227,9 +263,9 @@ abstract contract IdentityStore {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
 
         address signer = ecrecover(digest, v, r, s);
-        require(signer != address(0), "ecrecover failed");
-        require(authorizedKeys[signer], "unauthorized key");
-        require(nonce == nonces[signer], "invalid nonce");
+        if (signer == address(0)) revert EcrecoverFailed();
+        if (!authorizedKeys[signer]) revert UnauthorizedKey();
+        if (nonce != nonces[signer]) revert InvalidNonce();
         nonces[signer]++;
 
         emit IntentValidated(signer, targetContract, maxValue, nonce);
@@ -240,7 +276,7 @@ abstract contract IdentityStore {
     bool internal _gateOpen;
 
     modifier gatedFunction() {
-        require(_gateOpen, "delegation required");
+        if (!_gateOpen) revert DelegationRequired();
         _;
         _gateOpen = false;
     }
@@ -248,26 +284,27 @@ abstract contract IdentityStore {
     function validateDelegatedIntent(
         DelegationParams calldata delegation, IntentParams calldata intent
     ) external payable {
-        require(block.timestamp <= delegation.expiration, "delegation expired");
+        if (block.timestamp > delegation.expiration) revert DelegationExpired();
         address prover = _recoverDelegationProver(delegation);
-        require(authorizedProvers[prover], "unregistered prover");
-        require(delegation.nonce == delegationNonces[prover], "invalid delegation nonce");
+        if (!authorizedProvers[prover]) revert UnregisteredProver();
+        if (delegation.nonce != delegationNonces[prover]) revert InvalidDelegationNonce();
         delegationNonces[prover]++;
 
-        require(block.timestamp <= intent.expiration, "intent expired");
-        require(msg.value <= intent.maxValue, "value exceeds cap");
+        if (block.timestamp > intent.expiration) revert IntentExpired();
+        if (msg.value > intent.maxValue) revert ValueExceedsCap();
         address intentSigner = _recoverIntentSigner(intent);
 
-        require(intentSigner == delegation.delegate, "signer is not delegate");
-        require(intent.functionSig == delegation.scope, "function outside delegation scope");
-        require(intent.maxValue <= delegation.maxValue, "intent exceeds delegation cap");
+        if (intentSigner != delegation.delegate) revert SignerNotDelegate();
+        if (intent.functionSig != delegation.scope) revert ScopeMismatch();
+        if (intent.maxValue > delegation.maxValue) revert ExceedsDelegationCap();
 
-        require(intent.nonce == nonces[delegation.delegate], "invalid nonce");
+        if (intent.nonce != nonces[delegation.delegate]) revert InvalidNonce();
         nonces[delegation.delegate]++;
 
         _gateOpen = true;
 
         emit DelegatedIntentValidated(prover, delegation.delegate, intent.targetContract, intent.maxValue);
+        emit DelegationEndorsed(prover, delegation.delegate, delegation.scope);
     }
 
     function gatedPurchase(address, uint128) external gatedFunction {}
@@ -277,29 +314,32 @@ abstract contract IdentityStore {
     function freezeIdentity(address root) external onlyOwner {
         identityState[root] = IdentityState.Frozen;
         emit IdentityFrozen(root);
+        emit RecoveryStateChanged(root, IdentityState.Frozen);
     }
 
     function unfreezeIdentity(address root) external onlyOwner {
-        require(identityState[root] == IdentityState.Frozen, "not frozen");
+        if (identityState[root] != IdentityState.Frozen) revert NotFrozen();
         identityState[root] = IdentityState.Active;
         emit IdentityUnfrozen(root);
+        emit RecoveryStateChanged(root, IdentityState.Active);
     }
 
     function cancelAllSessions(address root) external {
-        require(msg.sender == root || msg.sender == owner, "not authorized");
+        if (msg.sender != root && msg.sender != owner) revert NotAuthorized();
         sessionEpoch[root]++;
         emit AllSessionsCancelled(root, sessionEpoch[root]);
+        emit SessionInvalidated(root, sessionEpoch[root]);
     }
 
     // --- Social Recovery ---
 
     function initiateRecovery(address oldRoot, address newRoot, uint8 v, bytes32 r, bytes32 s) external {
-        require(authorizedProvers[oldRoot], "old root not registered");
-        require(newRoot != address(0), "invalid new root");
-        require(pendingNewRoot[oldRoot] == address(0), "recovery already pending");
+        if (!authorizedProvers[oldRoot]) revert OldRootNotRegistered();
+        if (newRoot == address(0)) revert InvalidNewRoot();
+        if (pendingNewRoot[oldRoot] != address(0)) revert RecoveryAlreadyPending();
 
         address guardian = _recoverRecoverySigner(oldRoot, newRoot, uint64(block.chainid), uint64(recoveryNonces[oldRoot]), v, r, s);
-        require(isGuardian(oldRoot, guardian), "not a guardian");
+        if (!isGuardian(oldRoot, guardian)) revert NotAGuardian();
 
         pendingNewRoot[oldRoot] = newRoot;
         recoveryApprovals[oldRoot] = 1;
@@ -307,15 +347,16 @@ abstract contract IdentityStore {
         identityState[oldRoot] = IdentityState.RecoveryPending;
 
         emit RecoveryInitiated(oldRoot, newRoot, guardian);
+        emit RecoveryStateChanged(oldRoot, IdentityState.RecoveryPending);
     }
 
     function supportRecovery(address oldRoot, uint8 v, bytes32 r, bytes32 s) external {
         address newRoot = pendingNewRoot[oldRoot];
-        require(newRoot != address(0), "no pending recovery");
+        if (newRoot == address(0)) revert NoPendingRecovery();
 
         address guardian = _recoverRecoverySigner(oldRoot, newRoot, uint64(block.chainid), uint64(recoveryNonces[oldRoot]), v, r, s);
-        require(isGuardian(oldRoot, guardian), "not a guardian");
-        require(!recoveryApproved[oldRoot][guardian], "already approved");
+        if (!isGuardian(oldRoot, guardian)) revert NotAGuardian();
+        if (recoveryApproved[oldRoot][guardian]) revert AlreadyApproved();
 
         recoveryApproved[oldRoot][guardian] = true;
         recoveryApprovals[oldRoot]++;
@@ -328,19 +369,20 @@ abstract contract IdentityStore {
     }
 
     function cancelRecovery(address oldRoot) external {
-        require(msg.sender == oldRoot, "only old root can cancel");
-        require(pendingNewRoot[oldRoot] != address(0), "no pending recovery");
+        if (msg.sender != oldRoot) revert OnlyOldRootCanCancel();
+        if (pendingNewRoot[oldRoot] == address(0)) revert NoPendingRecovery();
         _clearRecovery(oldRoot);
         identityState[oldRoot] = IdentityState.Active;
         emit RecoveryCancelled(oldRoot);
+        emit RecoveryStateChanged(oldRoot, IdentityState.Active);
     }
 
     function finalizeRecovery(address oldRoot) external {
         address newRoot = pendingNewRoot[oldRoot];
-        require(newRoot != address(0), "no pending recovery");
-        require(recoveryApprovals[oldRoot] >= GUARDIAN_THRESHOLD, "threshold not met");
-        require(recoveryInitiatedAt[oldRoot] > 0, "timelock not started");
-        require(block.timestamp >= recoveryInitiatedAt[oldRoot] + RECOVERY_WINDOW, "timelock not expired");
+        if (newRoot == address(0)) revert NoPendingRecovery();
+        if (recoveryApprovals[oldRoot] < GUARDIAN_THRESHOLD) revert ThresholdNotMet();
+        if (recoveryInitiatedAt[oldRoot] == 0) revert TimelockNotStarted();
+        if (block.timestamp < recoveryInitiatedAt[oldRoot] + RECOVERY_WINDOW) revert TimelockNotExpired();
 
         authorizedProvers[oldRoot] = false;
         authorizedProvers[newRoot] = true;
@@ -354,6 +396,8 @@ abstract contract IdentityStore {
         identityState[newRoot] = IdentityState.Active;
 
         emit RecoveryFinalized(oldRoot, newRoot);
+        emit RecoveryStateChanged(oldRoot, IdentityState.Active);
+        emit RecoveryStateChanged(newRoot, IdentityState.Active);
     }
 
     function _clearRecovery(address oldRoot) internal {
