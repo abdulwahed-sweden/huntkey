@@ -1,7 +1,7 @@
-/// HuntLoan execution engine — EIP-1559 tx construction, signing, nonce
-/// management, retry with fee-bumping, LIVE vs DRY_RUN modes.
+/// Transaction executor — EIP-1559 tx construction, signing, nonce
+/// management, RBF retry loop.
 ///
-/// Pipeline position: scanner → simulator → [executor] → contract
+/// Reusable skeleton: implement your contract call in send_tx().
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,12 +15,15 @@ use alloy::{
         },
         Identity, Provider, ProviderBuilder, RootProvider,
     },
+    rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
-    sol,
-    sol_types::SolCall,
 };
+use eyre::{bail, Result, WrapErr};
+use tokio::sync::Mutex;
+use tracing::{info, warn};
 
-/// Concrete type returned by `ProviderBuilder::new().wallet(w).connect_http(url)`.
+use crate::config::Config;
+
 type DefaultFillers = JoinFill<
     Identity,
     JoinFill<GasFiller, JoinFill<BlobGasFiller, JoinFill<NonceFiller, ChainIdFiller>>>,
@@ -29,25 +32,6 @@ type WalletHttpProvider = FillProvider<
     JoinFill<DefaultFillers, WalletFiller<EthereumWallet>>,
     RootProvider,
 >;
-use eyre::{bail, Result, WrapErr};
-use tokio::sync::Mutex;
-use tracing::{info, warn};
-
-use crate::{config::Config, gas, scanner::Opportunity, simulator::SimOutput};
-
-// Solidity interface — matches HuntLoanFlashReceiver.sol
-sol! {
-    #[allow(missing_docs)]
-    #[sol(rpc)]
-    interface IHuntLoanReceiver {
-        function requestFlashLiquidation(
-            address debtAsset,
-            uint256 debtAmount,
-            address collateralAsset,
-            address borrower
-        ) external;
-    }
-}
 
 /// Outcome of a successful execution.
 #[derive(Debug, Clone)]
@@ -55,33 +39,20 @@ pub struct ExecutionResult {
     pub tx_hash:         TxHash,
     pub block_number:    u64,
     pub gas_used:        u64,
-    /// Wall-clock ms from execute() call to confirmed receipt.
-    #[allow(dead_code)]
     pub send_latency_ms: u64,
 }
 
-/// Pre-calculated EIP-1559 fees for one tx attempt.
-#[derive(Debug, Clone)]
-struct TxFees {
-    max_fee_per_gas:  u128,
-    max_priority_fee: u128,
-    gas_limit:        u64,
-}
-
-/// HuntLoan transaction executor.
-///
-/// Create once at startup and reuse across all blocks.
-pub struct HuntLoanExecutor {
+/// Transaction executor — create once at startup and reuse across all blocks.
+pub struct Executor {
     config:          Arc<Config>,
+    #[allow(dead_code)]
     wallet:          EthereumWallet,
     signer_address:  Address,
-    /// Cached nonce — bumped optimistically; reset from chain on error.
     nonce:           Mutex<Option<u64>>,
-    /// Pre-built HTTP provider for tx submission — avoids rebuilding per-execution.
     submit_provider: Arc<WalletHttpProvider>,
 }
 
-impl HuntLoanExecutor {
+impl Executor {
     pub fn new(config: Arc<Config>) -> Result<Self> {
         let signer: PrivateKeySigner = config
             .operator_key
@@ -108,37 +79,33 @@ impl HuntLoanExecutor {
         })
     }
 
-    /// Execute a liquidation opportunity.
+    /// Send a transaction to your contract.
     ///
-    /// DRY_RUN=true  → logs intent, no tx sent.
-    /// DRY_RUN=false → broadcasts with up to 3 retry attempts, bumping fees +15%
-    ///                 per retry using the same nonce.
-    pub async fn execute(
+    /// # Arguments
+    /// * `to`       - Contract address
+    /// * `calldata` - ABI-encoded function call
+    /// * `value`    - ETH value to send (usually 0)
+    /// * `gas_limit` - Gas limit for the tx
+    /// * `max_fee_per_gas` - EIP-1559 max fee
+    /// * `max_priority_fee` - EIP-1559 priority fee
+    pub async fn send_tx(
         &self,
-        opp: &Opportunity,
-        sim: &SimOutput,
-        base_fee_wei: u128,
-        regime: gas::Regime,
-        gross_profit_wei: u128,
+        to: Address,
+        calldata: Bytes,
+        value: U256,
+        gas_limit: u64,
+        max_fee_per_gas: u128,
+        max_priority_fee: u128,
     ) -> Result<ExecutionResult> {
         let t = Instant::now();
 
         if self.config.dry_run {
-            let fees = self.compute_fees(
-                opp.health_factor, base_fee_wei, sim.estimated_gas, regime, gross_profit_wei,
-            );
-            let tip_total_eth = fees.max_priority_fee as f64 * fees.gas_limit as f64 / 1e18;
             info!(
-                mode              = "DRY_RUN",
-                borrower          = %opp.borrower,
-                debt_usd          = opp.debt_usd,
-                estimated_profit  = sim.net_profit_usd,
-                gross_profit_wei  = gross_profit_wei,
-                max_fee_gwei      = fees.max_fee_per_gas / 1_000_000_000,
-                priority_fee_gwei = fees.max_priority_fee / 1_000_000_000,
-                tip_total_eth     = %format!("{:.6}", tip_total_eth),
-                gas_limit         = fees.gas_limit,
-                "DRY_RUN — tx NOT sent"
+                mode     = "DRY_RUN",
+                to       = %to,
+                calldata = %calldata,
+                gas      = gas_limit,
+                "DRY_RUN -- tx NOT sent"
             );
             return Ok(ExecutionResult {
                 tx_hash:         TxHash::ZERO,
@@ -148,227 +115,58 @@ impl HuntLoanExecutor {
             });
         }
 
-        // ── SOFT_LIVE: resolve nonce, encode calldata, print full tx preview ──
-        if self.config.soft_live {
-            let fees = self.compute_fees(
-                opp.health_factor, base_fee_wei, sim.estimated_gas, regime, gross_profit_wei,
-            );
-            let provider = ProviderBuilder::new()
-                .wallet(self.wallet.clone())
-                .connect_http(self.config.rpc_http.parse().wrap_err("RPC_URL invalid")?);
-            let nonce = self.acquire_nonce(&provider).await.unwrap_or(u64::MAX);
-
-            let calldata = Bytes::from(
-                IHuntLoanReceiver::requestFlashLiquidationCall {
-                    debtAsset:        opp.debt_asset,
-                    debtAmount:       U256::from(opp.debt_to_repay_raw),
-                    collateralAsset:  opp.collateral_asset,
-                    borrower:         opp.borrower,
-                }
-                .abi_encode(),
-            );
-
-            let tip_total_eth = fees.max_priority_fee as f64 * fees.gas_limit as f64 / 1e18;
-            info!(
-                mode                 = "SOFT_LIVE",
-                to                   = %self.config.huntloan_addr,
-                chain_id             = self.config.chain_id,
-                nonce                = nonce,
-                max_fee_gwei         = fees.max_fee_per_gas / 1_000_000_000,
-                priority_fee_gwei    = fees.max_priority_fee / 1_000_000_000,
-                tip_total_eth        = %format!("{:.6}", tip_total_eth),
-                gross_profit_wei     = gross_profit_wei,
-                gas_limit            = fees.gas_limit,
-                calldata_bytes       = calldata.len(),
-                calldata             = %calldata,
-                borrower             = %opp.borrower,
-                debt_to_repay_usd    = opp.debt_to_repay,
-                debt_to_repay_raw    = opp.debt_to_repay_raw,
-                collateral           = %opp.collateral_asset,
-                debt_asset           = %opp.debt_asset,
-                estimated_profit_usd = sim.net_profit_usd,
-                "SOFT_LIVE — full tx preview (NOT broadcast)"
-            );
-            return Ok(ExecutionResult {
-                tx_hash:         TxHash::ZERO,
-                block_number:    0,
-                gas_used:        0,
-                send_latency_ms: t.elapsed().as_millis() as u64,
-            });
-        }
-
-        // ── LIVE: RBF escalation loop ────────────────────────────────────────
-        self.broadcast_with_retry(
-            opp, base_fee_wei, regime, gross_profit_wei,
-            opp.health_factor, sim.estimated_gas, t,
-        ).await
-    }
-
-    // ── Broadcast + RBF escalation ──────────────────────────────────────────
-
-    #[allow(clippy::too_many_arguments)]
-    async fn broadcast_with_retry(
-        &self,
-        opp: &Opportunity,
-        base_fee_wei: u128,
-        regime: gas::Regime,
-        gross_profit_wei: u128,
-        health_factor: f64,
-        est_gas: u64,
-        t: Instant,
-    ) -> Result<ExecutionResult> {
-        use crate::constants::{RBF_BRIBE_STEPS, RBF_WAIT_MS, GAS_LIMIT, GAS_HEADROOM_NUM, GAS_HEADROOM_DEN};
-
-        // Use cached provider (private RPC for MEV protection)
-        let provider = self.submit_provider.clone();
-
-        // Micro-bankroll gate: refuse broadcast if wallet is below safety floor.
-        // Bail on RPC failure instead of silently bypassing the safety check.
-        let balance_wei = provider
+        // Wallet balance safety check
+        let balance_wei = self.submit_provider
             .get_balance(self.signer_address)
             .await
             .map(|b| b.to::<u128>())
             .wrap_err("Balance check RPC failed")?;
         if balance_wei < self.config.min_wallet_eth_wei {
             let bal_eth = balance_wei as f64 / 1e18;
-            // Fire low-balance Telegram alert (throttled to 1/hr inside)
             tokio::spawn(async move {
                 crate::alerts::send_low_balance(bal_eth).await;
             });
             bail!(
-                "Wallet {:.6} ETH below safety floor {:.6} ETH — refusing broadcast to preserve capital",
+                "Wallet {:.6} ETH below safety floor {:.6} ETH -- refusing broadcast",
                 bal_eth,
                 self.config.min_wallet_eth_wei as f64 / 1e18,
             );
         }
 
-        // Build escalation steps: RBF_BRIBE_STEPS + config.max_bribe_fraction as final attempt
-        let mut steps: Vec<f64> = RBF_BRIBE_STEPS.to_vec();
-        steps.push(self.config.max_bribe_fraction);
-        let num_steps = steps.len();
-
         let nonce = tokio::time::timeout(
             Duration::from_secs(10),
-            self.acquire_nonce(&provider),
+            self.acquire_nonce(&self.submit_provider),
         )
         .await
         .wrap_err("Nonce acquisition timed out after 10s")??;
 
-        let gas_limit = if est_gas > 0 {
-            ((est_gas as u128 * GAS_HEADROOM_NUM / GAS_HEADROOM_DEN).max(GAS_LIMIT as u128)) as u64
-        } else {
-            GAS_LIMIT
-        };
+        let tx = TransactionRequest::default()
+            .to(to)
+            .input(calldata.into())
+            .value(value)
+            .max_fee_per_gas(max_fee_per_gas)
+            .max_priority_fee_per_gas(max_priority_fee)
+            .gas_limit(gas_limit)
+            .nonce(nonce);
 
-        // Gas-cost cap: refuse broadcast if estimated cost exceeds config ceiling
-        let est_gas_cost_wei = (gas_limit as u128).saturating_mul(base_fee_wei);
-        if est_gas_cost_wei > self.config.max_gas_cost_wei {
-            bail!(
-                "Estimated gas cost {:.6} ETH exceeds cap {:.6} ETH",
-                est_gas_cost_wei as f64 / 1e18,
-                self.config.max_gas_cost_wei as f64 / 1e18,
-            );
-        }
+        let pending = self.submit_provider
+            .send_transaction(tx)
+            .await
+            .wrap_err("Transaction send failed")?;
 
-        for (attempt, &bribe_frac) in steps.iter().enumerate() {
-            let gas_tier = gas::compute_profit_aware_fees_with_bribe(
-                base_fee_wei, gross_profit_wei, health_factor,
-                regime, est_gas, self.config.max_bribe_wei, bribe_frac,
-            );
+        let tx_hash = *pending.tx_hash();
+        info!(tx_hash = %tx_hash, "Tx submitted");
 
-            let fees = TxFees {
-                max_fee_per_gas:  gas_tier.max_fee_per_gas,
-                max_priority_fee: gas_tier.max_priority_fee,
-                gas_limit,
-            };
+        let receipt = pending
+            .get_receipt()
+            .await
+            .wrap_err("Receipt wait failed")?;
 
-            let tip_total_eth = fees.max_priority_fee as f64 * fees.gas_limit as f64 / 1e18;
-            info!(
-                attempt           = attempt + 1,
-                bribe_fraction    = %format!("{:.2}", bribe_frac),
-                borrower          = %opp.borrower,
-                max_fee_gwei      = fees.max_fee_per_gas / 1_000_000_000,
-                priority_fee_gwei = fees.max_priority_fee / 1_000_000_000,
-                tip_total_eth     = %format!("{:.6}", tip_total_eth),
-                nonce             = nonce,
-                "Broadcasting liquidation tx (RBF)"
-            );
-
-            let contract = IHuntLoanReceiver::new(self.config.huntloan_addr, &provider);
-
-            let call = contract
-                .requestFlashLiquidation(
-                    opp.debt_asset,
-                    U256::from(opp.debt_to_repay_raw),
-                    opp.collateral_asset,
-                    opp.borrower,
-                )
-                .max_fee_per_gas(fees.max_fee_per_gas)
-                .max_priority_fee_per_gas(fees.max_priority_fee)
-                .gas(fees.gas_limit)
-                .nonce(nonce);
-
-            let is_last = attempt + 1 == num_steps;
-
-            match call.send().await {
-                Ok(pending) => {
-                    let tx_hash = *pending.tx_hash();
-                    info!(tx_hash = %tx_hash, attempt = attempt + 1, "Tx submitted");
-
-                    if is_last {
-                        // Last attempt — wait for receipt directly
-                        match pending.get_receipt().await {
-                            Ok(receipt) => return self.handle_receipt(receipt, tx_hash, nonce, t).await,
-                            Err(e) => {
-                                warn!(attempt = attempt + 1, error = %e, "Receipt wait failed on final attempt");
-                            }
-                        }
-                    } else {
-                        // Non-last: race receipt vs escalation timer
-                        tokio::select! {
-                            receipt_result = pending.get_receipt() => {
-                                match receipt_result {
-                                    Ok(receipt) => return self.handle_receipt(receipt, tx_hash, nonce, t).await,
-                                    Err(e) => {
-                                        warn!(attempt = attempt + 1, error = %e, "Receipt wait failed — escalating");
-                                    }
-                                }
-                            }
-                            _ = tokio::time::sleep(Duration::from_millis(RBF_WAIT_MS)) => {
-                                info!(attempt = attempt + 1, "RBF timer fired — escalating bribe");
-                                // continue to next step
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("revert") || msg.contains("execution reverted") {
-                        self.invalidate_nonce().await;
-                        bail!("Tx reverted: {}", msg);
-                    }
-                    warn!(attempt = attempt + 1, error = %msg, "Send error — escalating immediately");
-                    // Skip wait, escalate immediately
-                }
-            }
-        }
-
-        self.invalidate_nonce().await;
-        bail!("Execution failed after {} RBF attempts", num_steps)
-    }
-
-    /// Extract receipt data, confirm nonce, log, and return ExecutionResult.
-    async fn handle_receipt(
-        &self,
-        receipt: alloy::rpc::types::TransactionReceipt,
-        tx_hash: TxHash,
-        nonce: u64,
-        t: Instant,
-    ) -> Result<ExecutionResult> {
         let block_number = receipt.block_number.unwrap_or(0);
         let gas_used = receipt.gas_used;
         let send_ms = t.elapsed().as_millis() as u64;
         self.confirm_nonce(nonce).await;
+
         info!(
             tx_hash         = %tx_hash,
             block           = block_number,
@@ -376,6 +174,7 @@ impl HuntLoanExecutor {
             send_latency_ms = send_ms,
             "Tx confirmed"
         );
+
         Ok(ExecutionResult {
             tx_hash,
             block_number,
@@ -384,51 +183,14 @@ impl HuntLoanExecutor {
         })
     }
 
-    // ── EIP-1559 fee computation ──────────────────────────────────────────────
-
-    fn compute_fees(
-        &self,
-        health_factor: f64,
-        base_fee_wei: u128,
-        est_gas: u64,
-        regime: gas::Regime,
-        gross_profit_wei: u128,
-    ) -> TxFees {
-        let gas_tier = gas::compute_profit_aware_fees(
-            base_fee_wei,
-            gross_profit_wei,
-            health_factor,
-            regime,
-            est_gas,
-            self.config.max_bribe_wei,
-            self.config.max_bribe_fraction,
-        );
-
-        let gas_limit = if est_gas > 0 {
-            ((est_gas as u128 * crate::constants::GAS_HEADROOM_NUM / crate::constants::GAS_HEADROOM_DEN)
-                .max(crate::constants::GAS_LIMIT as u128)) as u64
-        } else {
-            crate::constants::GAS_LIMIT
-        };
-
-        TxFees {
-            max_fee_per_gas:  gas_tier.max_fee_per_gas,
-            max_priority_fee: gas_tier.max_priority_fee,
-            gas_limit,
-        }
-    }
-
-    /// Pre-fetch nonce from chain into cache. Call while sims are running
-    /// to save ~20-30ms from the execution critical path.
+    /// Pre-fetch nonce from chain into cache.
     pub async fn prefetch_nonce(&self) {
-        let provider = self.submit_provider.clone();
-        let _ = self.acquire_nonce(provider.as_ref()).await;
+        let _ = self.acquire_nonce(self.submit_provider.as_ref()).await;
     }
 
     // ── Nonce management ─────────────────────────────────────────────────────
 
     async fn acquire_nonce<P: Provider>(&self, provider: &P) -> Result<u64> {
-        // Fast path: cached nonce available, short lock
         {
             let mut guard = self.nonce.lock().await;
             if let Some(n) = *guard {
@@ -436,12 +198,10 @@ impl HuntLoanExecutor {
                 return Ok(n);
             }
         }
-        // Cold path: RPC call outside lock to avoid blocking other tasks
         let on_chain = provider
             .get_transaction_count(self.signer_address)
             .await
             .wrap_err("get_transaction_count failed")?;
-        // Re-check under lock (another task may have populated it)
         let mut guard = self.nonce.lock().await;
         if let Some(n) = *guard {
             *guard = Some(n + 1);
@@ -458,8 +218,9 @@ impl HuntLoanExecutor {
         }
     }
 
+    #[allow(dead_code)]
     async fn invalidate_nonce(&self) {
-        warn!("Nonce cache invalidated — will re-fetch from chain on next tx");
+        warn!("Nonce cache invalidated -- will re-fetch from chain on next tx");
         *self.nonce.lock().await = None;
     }
 }

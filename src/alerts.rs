@@ -1,21 +1,11 @@
-//! HuntLoan Telegram alerts — v3 complete rewrite.
-//!
-//! Design principles:
-//!   - Clear English (no abbreviations like "HF" without context)
-//!   - Every icon matches the event meaning
-//!   - Smart address shortening (symbols for known tokens, 0xAB…CD for unknown)
-//!   - Timestamp on every message
-//!   - No raw hex dumps or error bytes — human-readable reasons
-//!   - Clean vertical layout optimized for mobile Telegram
+//! Telegram alerts — reusable notification system.
 //!
 //! Alert classes:
-//!   🟢 BOOT          — bot started successfully
-//!   💰 LIQUIDATION    — tx confirmed on-chain (profit or loss)
-//!   ❌ EXECUTION FAILED — tx failed to send or reverted
-//!   🚨 EMERGENCY STOP  — circuit breaker triggered
-//!   📊 STATUS REPORT   — periodic operational summary
-//!   🎯 TARGET LOCKED   — profitable opportunity found, executing now
-//!   ⏳ TARGET APPROACHING — warm position nearing liquidation threshold
+//!   BOOT          — bot started successfully
+//!   EMERGENCY STOP — circuit breaker triggered
+//!   STATUS REPORT  — periodic operational summary
+//!   LOW BALANCE    — wallet critically low
+//!   HEARTBEAT      — daily proof-of-life
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
@@ -26,17 +16,8 @@ use reqwest::Client;
 use tracing::warn;
 use eyre::Result;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CONSTANTS
-// ─────────────────────────────────────────────────────────────────────────────
+const LINE: &str = "----------------------------";
 
-const LINE: &str = "────────────────────────────";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// TIMESTAMP
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Returns "14:32:05 UTC" — compact, clear.
 fn timestamp() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -52,32 +33,26 @@ fn timestamp() -> String {
 // SMART ADDRESS DISPLAY
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Shorten any hex address to "0xABCD…1234" (10 chars).
 pub fn short_addr(addr: &str) -> String {
     if addr.len() < 12 { return addr.to_string(); }
-    format!("{}…{}", &addr[..6], &addr[addr.len()-4..])
+    format!("{}...{}", &addr[..6], &addr[addr.len()-4..])
 }
 
 /// Resolve a Base mainnet token address to its ticker symbol.
-/// Known tokens get clean names; unknown tokens get shortened hex.
 pub fn token_name(addr: &str) -> String {
     let a = addr.to_lowercase();
     match a.as_str() {
-        // ETH family
         s if s.ends_with("0000000000000000000006")                     => "WETH".into(),
         s if s.contains("2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22")    => "cbETH".into(),
         s if s.contains("c1cba3fcea344f92d9239c08c0568f6f2f0ee452")    => "wstETH".into(),
         s if s.contains("04c0599ae5a44757c0af6f9ec3b93da8976c150a")    => "weETH".into(),
         s if s.contains("b6fe221fe9eef5aba221c348ba20a1bf5e73624c")    => "rETH".into(),
-        // Stablecoins
         s if s.contains("833589fcd6edb6e08f4c7c32d4f71b54bda02913")    => "USDC".into(),
         s if s.contains("d9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca")    => "USDbC".into(),
         s if s.contains("50c5725949a6f0c72e6c4a641f24049a917db0cb")    => "DAI".into(),
         s if s.contains("4a3a6dd60a34bb2aba60d73b4c88315e9ceb6a3d")    => "USDT".into(),
-        // BTC family
         s if s.contains("cbb7c0000ab88b473b1f5afd9ef808440eed33bf")    => "cbBTC".into(),
         s if s.contains("2260fac5e5542a773aa44fbcfedf7c193bc2c599")    => "WBTC".into(),
-        // Unknown
         _ => short_addr(addr),
     }
 }
@@ -86,41 +61,15 @@ pub fn token_name(addr: &str) -> String {
 // HUMAN-READABLE ERROR DECODER
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Translate raw revert data into plain English a human can act on.
 pub fn explain_error(raw: &str) -> String {
-    // Aave V3 errors
-    if raw.contains("HEALTH_FACTOR_NOT_BELOW_THRESHOLD") || raw.contains("0x35") {
-        return "The position is no longer underwater — another bot liquidated it first.".into();
-    }
-    if raw.contains("SPECIFIED_CURRENCY_NOT_BORROWED_BY_USER") || raw.contains("0x40") {
-        return "The borrower does not owe this token — wrong debt asset selected.".into();
-    }
-    if raw.contains("COLLATERAL_CANNOT_BE_LIQUIDATED") {
-        return "This collateral type cannot be liquidated on Aave V3.".into();
-    }
-
-    // HuntLoan contract errors
-    if raw.contains("OnlyOperator") {
-        return "Access denied — the caller is not the authorized operator.".into();
-    }
-    if raw.contains("ContractSettled") {
-        return "The contract has already been settled and closed.".into();
-    }
-    if raw.contains("SwapFailed") {
-        return "All DEX routes failed — no liquidity path found for this token pair.".into();
-    }
-    if raw.contains("LiquidationUnprofitable") {
-        return "The swap returned less than the flash loan owed — trade would be a loss.".into();
-    }
-
     // ERC20 / transfer errors
     if raw.contains("STF") || raw.contains("SafeERC20") || raw.contains("TransferFailed") {
-        return "Token transfer failed — likely an approval or balance issue.".into();
+        return "Token transfer failed -- likely an approval or balance issue.".into();
     }
 
     // Transaction-level errors
     if raw.contains("nonce too low") {
-        return "Nonce conflict — a previous transaction was confirmed out of order.".into();
+        return "Nonce conflict -- a previous transaction was confirmed out of order.".into();
     }
     if raw.contains("replacement transaction underpriced") {
         return "Gas price too low to replace the pending transaction.".into();
@@ -129,10 +78,9 @@ pub fn explain_error(raw: &str) -> String {
         return "Wallet does not have enough ETH to cover gas fees.".into();
     }
     if raw.contains("timeout") || raw.contains("Timeout") {
-        return "RPC request timed out — network may be congested.".into();
+        return "RPC request timed out -- network may be congested.".into();
     }
 
-    // Fallback: truncate raw error to something readable
     let clean: String = raw.chars().take(150).collect();
     format!("Unexpected error: {clean}")
 }
@@ -143,31 +91,9 @@ pub fn explain_error(raw: &str) -> String {
 
 pub struct AlertStats {
     pub blocks_processed: AtomicU64,
-    pub opps_detected:    AtomicU64,
-    pub sims_passed:      AtomicU64,
     pub execs_attempted:  AtomicU64,
     pub execs_succeeded:  AtomicU64,
-    pub gas_cost_gwei:    AtomicU64,
-    pub net_profit_cents: AtomicU64,
-    pub revert_reasons:   Mutex<HashMap<String, u64>>,
     pub session_start:    Instant,
-}
-
-impl AlertStats {
-    pub fn record_revert(&self, reason: &str) {
-        let explained = explain_error(reason);
-        let key: String = explained.chars().take(100).collect();
-        let mut map = self.revert_reasons.lock().unwrap_or_else(|e| e.into_inner());
-        *map.entry(key).or_insert(0) += 1;
-    }
-
-    pub fn top_reverts(&self, n: usize) -> Vec<(String, u64)> {
-        let map = self.revert_reasons.lock().unwrap_or_else(|e| e.into_inner());
-        let mut v: Vec<_> = map.iter().map(|(k, &c)| (k.clone(), c)).collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
-        v.truncate(n);
-        v
-    }
 }
 
 static STATS: OnceLock<AlertStats> = OnceLock::new();
@@ -175,13 +101,8 @@ static STATS: OnceLock<AlertStats> = OnceLock::new();
 pub fn get_stats() -> &'static AlertStats {
     STATS.get_or_init(|| AlertStats {
         blocks_processed: AtomicU64::new(0),
-        opps_detected:    AtomicU64::new(0),
-        sims_passed:      AtomicU64::new(0),
         execs_attempted:  AtomicU64::new(0),
         execs_succeeded:  AtomicU64::new(0),
-        gas_cost_gwei:    AtomicU64::new(0),
-        net_profit_cents: AtomicU64::new(0),
-        revert_reasons:   Mutex::new(HashMap::new()),
         session_start:    Instant::now(),
     })
 }
@@ -192,7 +113,7 @@ pub fn get_stats() -> &'static AlertStats {
 
 static ALERT_STATE: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 
-fn throttle_guard(key: &str, limit: Duration) -> bool {
+pub fn throttle_guard(key: &str, limit: Duration) -> bool {
     if limit.is_zero() { return true; }
     let mut guard = ALERT_STATE.lock().unwrap_or_else(|e| e.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
@@ -254,112 +175,27 @@ pub async fn send_telegram(
     Ok(())
 }
 
-
 // ═════════════════════════════════════════════════════════════════════════════
-//  🟢 BOOT — Bot started
+//  BOOT
 // ═════════════════════════════════════════════════════════════════════════════
 
 pub fn fmt_boot(mode: &str, contract: &str, operator: &str) -> String {
     let t = timestamp();
     format!(
-        "🟢 <b>Bot Online</b>\n\
+        "<b>Bot Online</b>\n\
          {LINE}\n\
-         🕐  {t}\n\
-         ⚙️  Mode: <b>{mode}</b>\n\
-         📜  Contract: <code>{}</code>\n\
-         👤  Operator: <code>{}</code>\n\
-         ⛓️  Chain: Base Mainnet (8453)",
+         {t}\n\
+         Mode: <b>{mode}</b>\n\
+         Contract: <code>{}</code>\n\
+         Operator: <code>{}</code>\n\
+         Chain: Base Mainnet (8453)",
         short_addr(contract),
         short_addr(operator),
     )
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  💰 PROFIT CAUGHT — Transaction confirmed on-chain
-// ═════════════════════════════════════════════════════════════════════════════
-
-/// Bundled parameters for `fmt_executed()` — avoids a 12-parameter function signature.
-pub struct ExecutedData<'a> {
-    pub borrower:       &'a str,
-    pub hf:             f64,
-    pub debt_usd:       u128,
-    pub collateral:     &'a str,
-    pub debt_asset:     &'a str,
-    pub sim_profit_usd: i128,
-    pub gas_used:       u64,
-    pub base_fee_wei:   u128,
-    pub eth_price_usd:  u128,
-    pub tx_hash:        &'a str,
-    pub block_num:      u64,
-    pub status:         u8,
-}
-
-pub fn fmt_executed(d: &ExecutedData<'_>) -> String {
-    let t = timestamp();
-    let coll = token_name(d.collateral);
-    let debt = token_name(d.debt_asset);
-    let gas_eth = d.gas_used as f64 * d.base_fee_wei as f64 / 1e18;
-    let gas_usd = gas_eth * d.eth_price_usd as f64;
-    let tx_hash = d.tx_hash;
-    let tx_link = format!("https://basescan.org/tx/{tx_hash}");
-    let block_num = d.block_num;
-    let sim_profit_usd = d.sim_profit_usd;
-    let debt_usd = d.debt_usd;
-    let hf = d.hf;
-
-    if d.status == 1 {
-        format!(
-            "💰 <b>PROFIT CAUGHT!</b>\n\
-             {LINE}\n\
-             🕐  {t}  ·  Block #{block_num}\n\
-             \n\
-             Amount: <b>${sim_profit_usd}</b> USD\n\
-             TX: <code>{tx_hash}</code>\n\
-             Contract: <code>{}</code>\n\
-             \n\
-             Route: {coll} → {debt}  ·  Debt: ${debt_usd}\n\
-             HF: {hf:.4}  ·  Gas: {gas_eth:.5} ETH (${gas_usd:.2})\n\
-             🔗 <a href=\"{tx_link}\">BaseScan</a>",
-            short_addr(d.borrower),
-        )
-    } else {
-        format!(
-            "⚠️ <b>ATTEMPT FAILED</b>\n\
-             {LINE}\n\
-             🕐  {t}  ·  Block #{block_num}\n\
-             \n\
-             Reason: Transaction reverted on-chain\n\
-             Potential Loss: {gas_eth:.5} ETH (${gas_usd:.2})\n\
-             TX: <code>{tx_hash}</code>\n\
-             \n\
-             Borrower: <code>{}</code>  ·  Route: {coll} → {debt}",
-            short_addr(d.borrower),
-        )
-    }
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-//  ⚠️ ATTEMPT FAILED — Transaction could not be sent or reverted
-// ═════════════════════════════════════════════════════════════════════════════
-
-pub fn fmt_failed_exec(reason: &str, borrower: &str, hint: &str) -> String {
-    let t = timestamp();
-    let explained = explain_error(reason);
-
-    format!(
-        "⚠️ <b>ATTEMPT FAILED</b>\n\
-         {LINE}\n\
-         🕐  {t}\n\
-         \n\
-         Reason: {explained}\n\
-         Borrower: <code>{}</code>\n\
-         Suggestion: {hint}",
-        short_addr(borrower),
-    )
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-//  🚨 EMERGENCY STOP — Circuit breaker activated
+//  CIRCUIT BREAKER
 // ═════════════════════════════════════════════════════════════════════════════
 
 pub fn fmt_circuit_breaker(trigger: &str, detail: &str) -> String {
@@ -367,178 +203,47 @@ pub fn fmt_circuit_breaker(trigger: &str, detail: &str) -> String {
     let detail_clean: String = detail.chars().take(200).collect();
 
     format!(
-        "🚨 <b>Emergency Stop — Circuit Breaker</b>\n\
+        "<b>Emergency Stop -- Circuit Breaker</b>\n\
          {LINE}\n\
-         🕐  {t}\n\
+         {t}\n\
          \n\
-         💥  Trigger: <b>{trigger}</b>\n\
-         📋  Detail: {detail_clean}\n\
+         Trigger: <b>{trigger}</b>\n\
+         Detail: {detail_clean}\n\
          \n\
-         🔧  Action required: Check logs and restart the bot manually."
+         Action required: Check logs and restart the bot manually."
     )
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  📊 STATUS REPORT — Periodic operational summary
+//  STATUS REPORT
 // ═════════════════════════════════════════════════════════════════════════════
 
-#[allow(clippy::too_many_arguments)]
 pub fn fmt_summary(
-    uptime_secs:    u64,
-    blocks:         u64,
-    opps:           u64,
-    sims_passed:    u64,
-    execs_tried:    u64,
-    execs_ok:       u64,
-    gas_cost_usd:   f64,
-    net_profit_usd: f64,
-    top_reverts:    &[(String, u64)],
+    uptime_secs:  u64,
+    blocks:       u64,
+    execs_tried:  u64,
+    execs_ok:     u64,
 ) -> String {
     let t = timestamp();
     let uptime = format_uptime(uptime_secs);
 
-    let win_rate = if execs_tried > 0 {
-        format!("{:.0}%", execs_ok as f64 / execs_tried as f64 * 100.0)
-    } else {
-        "N/A".into()
-    };
-
-    let scan_rate = if blocks > 0 {
-        format!("{:.2}%", opps as f64 / blocks as f64 * 100.0)
-    } else {
-        "0%".into()
-    };
-
-    let sim_rate = if opps > 0 {
-        format!("{:.0}%", sims_passed as f64 / opps as f64 * 100.0)
-    } else {
-        "N/A".into()
-    };
-
-    let pnl = if net_profit_usd >= 0.0 {
-        format!("+${net_profit_usd:.2}")
-    } else {
-        format!("-${:.2}", net_profit_usd.abs())
-    };
-
-    let errors_section = if top_reverts.is_empty() {
-        "  ✅ No errors recorded".into()
-    } else {
-        top_reverts.iter()
-            .map(|(reason, count)| format!("  · {count}× — {reason}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
     format!(
-        "📊 <b>Status Report</b>\n\
+        "<b>Status Report</b>\n\
          {LINE}\n\
-         🕐  {t}  ·  Uptime: {uptime}\n\
+         {t}  |  Uptime: {uptime}\n\
          \n\
-         <b>Pipeline:</b>\n\
-         📡  {blocks} blocks scanned → {opps} opportunities ({scan_rate})\n\
-         🧪  {opps} simulated → {sims_passed} profitable ({sim_rate})\n\
-         ⚔️  {execs_tried} executed → {execs_ok} confirmed ({win_rate})\n\
-         \n\
-         <b>Financials:</b>\n\
-         💵  Net profit: <b>{pnl}</b>\n\
-         ⛽  Gas spent: ${gas_cost_usd:.2}\n\
-         \n\
-         <b>Top errors:</b>\n\
-         {errors_section}"
+         Blocks: {blocks}\n\
+         Executions: {execs_tried} attempted, {execs_ok} confirmed"
     )
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  🎯 TARGET LOCKED — Profitable opportunity, about to execute
-// ═════════════════════════════════════════════════════════════════════════════
-
-pub fn fmt_opportunity(
-    borrower:       &str,
-    hf:             f64,
-    debt_usd:       u128,
-    collateral:     &str,
-    debt_asset:     &str,
-    net_profit_usd: i128,
-    score:          f64,
-) -> String {
-    let t = timestamp();
-    let coll = token_name(collateral);
-    let debt = token_name(debt_asset);
-
-    format!(
-        "🎯 <b>Target Locked — Executing Now</b>\n\
-         {LINE}\n\
-         🕐  {t}\n\
-         \n\
-         👤  Borrower: <code>{}</code>\n\
-         ❤️  Health Factor: <b>{hf:.4}</b>\n\
-         📊  Priority Score: {score:.1}\n\
-         🔄  Route: {coll} → {debt}\n\
-         💳  Debt: ${debt_usd}\n\
-         💵  Expected profit: <b>+${net_profit_usd}</b>",
-        short_addr(borrower),
-    )
-}
-
-pub async fn send_opportunity(
-    borrower: &str, hf: f64, debt_usd: u128,
-    collateral: &str, debt_asset: &str,
-    net_profit_usd: i128, score: f64,
-) {
-    let msg = fmt_opportunity(borrower, hf, debt_usd, collateral, debt_asset, net_profit_usd, score);
-    let key = format!("opp-{}", &borrower[..borrower.len().min(10)]);
-    let _ = send_telegram(msg, Some(&key), 120).await;
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-//  ⏳ TARGET APPROACHING — Warm position nearing liquidation
-// ═════════════════════════════════════════════════════════════════════════════
-
-pub fn fmt_approaching(
-    borrower:    &str,
-    hf:          f64,
-    eta_minutes: f64,
-    debt_usd:    u128,
-) -> String {
-    let t = timestamp();
-
-    let urgency = if eta_minutes < 3.0 {
-        "🔴 Imminent"
-    } else if eta_minutes < 10.0 {
-        "🟠 Approaching"
-    } else {
-        "🟡 Watching"
-    };
-
-    format!(
-        "⏳ <b>Target Approaching — {urgency}</b>\n\
-         {LINE}\n\
-         🕐  {t}\n\
-         \n\
-         👤  Borrower: <code>{}</code>\n\
-         ❤️  Health Factor: <b>{hf:.4}</b>\n\
-         ⏰  Estimated time to liquidation: <b>~{eta_minutes:.0} minutes</b>\n\
-         💳  Debt at risk: ${debt_usd}",
-        short_addr(borrower),
-    )
-}
-
-pub async fn send_approaching(
-    borrower: &str, hf: f64, eta_minutes: f64, debt_usd: u128,
-) {
-    let msg = fmt_approaching(borrower, hf, eta_minutes, debt_usd);
-    let key = format!("approach-{}", &borrower[..borrower.len().min(10)]);
-    let _ = send_telegram(msg, Some(&key), 300).await;
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-//  🛑 LOW BALANCE — Wallet critically low
+//  LOW BALANCE
 // ═════════════════════════════════════════════════════════════════════════════
 
 pub fn fmt_low_balance(balance_eth: f64) -> String {
     format!(
-        "🛑 <b>CRITICAL: LOW BALANCE</b>\n\
+        "<b>CRITICAL: LOW BALANCE</b>\n\
          {LINE}\n\
          \n\
          Current: <b>{balance_eth:.6} ETH</b>\n\
@@ -548,29 +253,26 @@ pub fn fmt_low_balance(balance_eth: f64) -> String {
 
 pub async fn send_low_balance(balance_eth: f64) {
     let msg = fmt_low_balance(balance_eth);
-    // Throttle to once per hour — avoid spamming on every block
     let _ = send_telegram(msg, Some("low-balance"), 3600).await;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  🤖 HEARTBEAT — Daily proof-of-life
+//  HEARTBEAT
 // ═════════════════════════════════════════════════════════════════════════════
 
-pub fn fmt_heartbeat(candidates: usize) -> String {
+pub fn fmt_heartbeat(info_count: usize) -> String {
     let t = timestamp();
     format!(
-        "🤖 <b>HuntLoan Heartbeat</b>\n\
+        "<b>Heartbeat</b>\n\
          {LINE}\n\
-         🕐  {t}\n\
+         {t}\n\
          \n\
-         System is UP. Scanning {candidates}+ addresses.\n\
-         Status: Hunting..."
+         System is UP. Items tracked: {info_count}"
     )
 }
 
-/// Send a daily heartbeat — throttled to once per 24 hours.
-pub async fn send_heartbeat(candidates: usize) {
-    let msg = fmt_heartbeat(candidates);
+pub async fn send_heartbeat(info_count: usize) {
+    let msg = fmt_heartbeat(info_count);
     let _ = send_telegram(msg, Some("heartbeat-daily"), 86400).await;
 }
 
@@ -603,22 +305,12 @@ mod tests {
         assert_eq!(token_name("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"), "USDC");
         assert_eq!(token_name("0x4200000000000000000000000000000000000006"), "WETH");
         assert_eq!(token_name("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"), "cbBTC");
-        assert_eq!(token_name("0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452"), "wstETH");
     }
 
     #[test]
     fn token_name_shortens_unknown() {
         let result = token_name("0xDEADBEEF00000000000000000000000000001234");
-        assert!(result.contains("…"), "Unknown should be shortened: {result}");
-    }
-
-    #[test]
-    fn explain_error_translates_aave_errors() {
-        let r = explain_error("execution reverted: HEALTH_FACTOR_NOT_BELOW_THRESHOLD");
-        assert!(r.contains("no longer underwater"));
-
-        let r = explain_error("SwapFailed(0x123, 0x456, 1000, 500)");
-        assert!(r.contains("DEX routes failed"));
+        assert!(result.contains("..."), "Unknown should be shortened: {result}");
     }
 
     #[test]
@@ -634,42 +326,6 @@ mod tests {
     }
 
     #[test]
-    fn fmt_executed_shows_profit_caught() {
-        let msg = fmt_executed(&ExecutedData {
-            borrower:       "0x1234567890abcdef1234567890abcdef12345678",
-            hf:             0.9850,
-            debt_usd:       50_000,
-            collateral:     "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC
-            debt_asset:     "0x4200000000000000000000000000000000000006",   // WETH
-            sim_profit_usd: 250,
-            gas_used:       450_000,
-            base_fee_wei:   5_000_000,
-            eth_price_usd:  2_500,
-            tx_hash:        "0xABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD",
-            block_num:      12345678,
-            status:         1,
-        });
-        assert!(msg.contains("PROFIT CAUGHT"), "Should show profit caught: {msg}");
-        assert!(msg.contains("USDC → WETH"), "Should show token symbols: {msg}");
-        assert!(msg.contains("$250"), "Should show amount");
-        assert!(msg.contains("BaseScan"), "Should have explorer link");
-    }
-
-    #[test]
-    fn fmt_summary_shows_pipeline_funnel() {
-        let msg = fmt_summary(
-            7261, 3600, 12, 5, 3, 2, 4.50, 180.0,
-            &[("The position is no longer underwater".into(), 7)],
-        );
-        assert!(msg.contains("Status Report"));
-        assert!(msg.contains("3600 blocks scanned"));
-        assert!(msg.contains("12 opportunities"));
-        assert!(msg.contains("2 confirmed"));
-        assert!(msg.contains("+$180.00"));
-        assert!(msg.contains("7×"));
-    }
-
-    #[test]
     fn fmt_boot_is_clean() {
         let msg = fmt_boot(
             "DRY_RUN",
@@ -678,14 +334,14 @@ mod tests {
         );
         assert!(msg.contains("Bot Online"));
         assert!(msg.contains("DRY_RUN"));
-        assert!(msg.contains("0x60d0…b46f"));  // shortened
+        assert!(msg.contains("0x60d0...b46f"));
         assert!(msg.contains("Base Mainnet"));
     }
 
     #[test]
     fn throttle_works() {
-        assert!(throttle_guard("test_unique_key", Duration::from_secs(60)));
-        assert!(!throttle_guard("test_unique_key", Duration::from_secs(60)));
-        assert!(throttle_guard("different_key", Duration::from_secs(60)));
+        assert!(throttle_guard("test_skel_key", Duration::from_secs(60)));
+        assert!(!throttle_guard("test_skel_key", Duration::from_secs(60)));
+        assert!(throttle_guard("different_skel_key", Duration::from_secs(60)));
     }
 }
