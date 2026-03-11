@@ -289,6 +289,129 @@ pub fn recover_signer(
     eth_address(&recovered_key)
 }
 
+// ---------------------------------------------------------------------------
+// Sovereign Identity Protocol — Delegation Certificates
+// ---------------------------------------------------------------------------
+
+const DELEGATION_TYPE_STR: &str =
+    "DelegationCertificate(address delegate,bytes4 scope,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce)";
+
+/// A delegation certificate that links an ActionKey back to a RootIdentity.
+/// The Root signs this off-chain; the contract verifies the chain on-chain.
+#[derive(Debug, Clone)]
+pub struct DelegationCertificate {
+    /// Ethereum address of the delegated action key.
+    pub delegate: [u8; 20],
+    /// Function selector the delegate is authorized to invoke.
+    pub scope: [u8; 4],
+    /// Maximum wei the delegate may spend per intent.
+    pub max_value: u128,
+    /// Unix timestamp after which the delegation is void.
+    pub expiration: u64,
+    /// Chain this delegation is bound to (prevents cross-chain replay).
+    pub chain_id: u64,
+    /// Per-prover nonce consumed on-chain to prevent replay.
+    pub nonce: u64,
+}
+
+/// Signed delegation — carries the certificate plus its ECDSA components.
+#[derive(Debug, Clone)]
+pub struct SignedDelegation {
+    pub certificate: DelegationCertificate,
+    pub v: u8,
+    pub r: [u8; 32],
+    pub s: [u8; 32],
+}
+
+/// Compute the EIP-712 struct hash of a DelegationCertificate.
+pub fn delegation_struct_hash(cert: &DelegationCertificate) -> [u8; 32] {
+    let typehash = keccak256(DELEGATION_TYPE_STR.as_bytes());
+
+    let mut buf = Vec::with_capacity(7 * 32);
+    buf.extend_from_slice(&typehash);
+    buf.extend_from_slice(&address_to_word(&cert.delegate));
+    buf.extend_from_slice(&right_pad_32(&cert.scope)); // bytes4 right-padded
+    buf.extend_from_slice(&u128_to_word(cert.max_value));
+    buf.extend_from_slice(&u64_to_word(cert.expiration));
+    buf.extend_from_slice(&u64_to_word(cert.chain_id));
+    buf.extend_from_slice(&u64_to_word(cert.nonce));
+    keccak256(&buf)
+}
+
+/// Compute the EIP-712 signing hash for a delegation certificate.
+pub fn delegation_signing_hash(
+    cert: &DelegationCertificate,
+    verifying_contract: &[u8; 20],
+) -> [u8; 32] {
+    let ds = domain_separator(cert.chain_id, verifying_contract);
+    let sh = delegation_struct_hash(cert);
+
+    let mut buf = Vec::with_capacity(2 + 32 + 32);
+    buf.extend_from_slice(&[0x19, 0x01]);
+    buf.extend_from_slice(&ds);
+    buf.extend_from_slice(&sh);
+    keccak256(&buf)
+}
+
+/// Sign a DelegationCertificate with the RootIdentity private key.
+/// The root_private_key bytes are wrapped in Zeroizing to ensure cleanup.
+pub fn sign_delegation(
+    cert: &DelegationCertificate,
+    verifying_contract: &[u8; 20],
+    root_private_key: &[u8; 32],
+) -> SignedDelegation {
+    use k256::ecdsa::SigningKey;
+
+    let hash = delegation_signing_hash(cert, verifying_contract);
+
+    // Wrap the signing key so it zeroizes on drop
+    let mut key_bytes = Zeroizing::new(*root_private_key);
+    let signing_key = SigningKey::from_bytes((&*key_bytes).into()).expect("invalid private key");
+    key_bytes.zeroize();
+
+    let (sig, recid) = signing_key
+        .sign_prehash_recoverable(&hash)
+        .expect("signing failed");
+
+    let bytes = sig.to_bytes();
+    let mut r = [0u8; 32];
+    let mut s = [0u8; 32];
+    r.copy_from_slice(&bytes[..32]);
+    s.copy_from_slice(&bytes[32..]);
+
+    SignedDelegation {
+        certificate: cert.clone(),
+        v: recid.to_byte() + 27,
+        r,
+        s,
+    }
+}
+
+/// Recover the prover (root identity) address from a signed delegation.
+pub fn recover_delegator(
+    cert: &DelegationCertificate,
+    verifying_contract: &[u8; 20],
+    v: u8,
+    r: &[u8; 32],
+    s: &[u8; 32],
+) -> [u8; 20] {
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+
+    let hash = delegation_signing_hash(cert, verifying_contract);
+
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(r);
+    sig_bytes[32..].copy_from_slice(s);
+
+    let signature = Signature::from_bytes((&sig_bytes).into()).expect("invalid signature");
+    let recid = RecoveryId::from_byte(v - 27).expect("invalid recovery id");
+
+    let recovered =
+        VerifyingKey::recover_from_prehash(&hash, &signature, recid).expect("recovery failed");
+
+    eth_address(&recovered)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,6 +634,130 @@ mod sovereign_tests {
         assert_eq!(recovered, action_key.eth_address.unwrap());
     }
 
+    #[test]
+    fn test_delegation_certificate_sign_and_recover() {
+        let root = test_root();
+        let hierarchy = KeyHierarchy::new(root);
+
+        let root_id = hierarchy.derive_role(KeyRole::RootIdentity, 0);
+        let action_key = hierarchy.derive_role(KeyRole::Action, 0);
+
+        let verifying_contract = [0xCC; 20];
+        let cert = DelegationCertificate {
+            delegate: action_key.eth_address.unwrap(),
+            scope: [0xa9, 0x05, 0x9c, 0xbb],
+            max_value: 1_000_000,
+            expiration: 1900000000,
+            chain_id: 1,
+            nonce: 0,
+        };
+
+        let root_privkey: [u8; 32] = root_id.private_key.as_slice().try_into().unwrap();
+        let signed = sign_delegation(&cert, &verifying_contract, &root_privkey);
+
+        let recovered = recover_delegator(
+            &signed.certificate,
+            &verifying_contract,
+            signed.v,
+            &signed.r,
+            &signed.s,
+        );
+        assert_eq!(recovered, root_id.eth_address.unwrap());
+    }
+
+    #[test]
+    fn test_delegation_hash_deterministic() {
+        let contract = [0xAA; 20];
+        let cert = DelegationCertificate {
+            delegate: [0xBB; 20],
+            scope: [0xa9, 0x05, 0x9c, 0xbb],
+            max_value: 500_000,
+            expiration: 1800000000,
+            chain_id: 1,
+            nonce: 0,
+        };
+
+        let h1 = delegation_signing_hash(&cert, &contract);
+        let h2 = delegation_signing_hash(&cert, &contract);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_delegation_chain_id_binding() {
+        let contract = [0xAA; 20];
+        let cert1 = DelegationCertificate {
+            delegate: [0xBB; 20],
+            scope: [0xa9, 0x05, 0x9c, 0xbb],
+            max_value: 500_000,
+            expiration: 1800000000,
+            chain_id: 1,
+            nonce: 0,
+        };
+        let cert2 = DelegationCertificate {
+            chain_id: 137, // Polygon
+            ..cert1.clone()
+        };
+
+        let h1 = delegation_signing_hash(&cert1, &contract);
+        let h2 = delegation_signing_hash(&cert2, &contract);
+        assert_ne!(h1, h2, "different chain_ids must produce different hashes");
+    }
+
+    #[test]
+    fn test_full_delegation_flow() {
+        // Root creates hierarchy, derives action key, signs delegation, action key signs intent
+        let root = test_root();
+        let mut hierarchy = KeyHierarchy::new(root);
+
+        let root_id = hierarchy.derive_role(KeyRole::RootIdentity, 0);
+        let action_key = hierarchy.next_action_key();
+
+        let verifying_contract = [0xCC; 20];
+        let fn_sig = [0xa9, 0x05, 0x9c, 0xbb];
+
+        // Step 1: Root endorses action key
+        let cert = DelegationCertificate {
+            delegate: action_key.eth_address.unwrap(),
+            scope: fn_sig,
+            max_value: 2_000_000_000_000_000_000, // 2 ETH
+            expiration: 1900000000,
+            chain_id: 1,
+            nonce: 0,
+        };
+
+        let root_privkey: [u8; 32] = root_id.private_key.as_slice().try_into().unwrap();
+        let signed_deleg = sign_delegation(&cert, &verifying_contract, &root_privkey);
+
+        // Verify delegation recovery
+        let recovered_root = recover_delegator(
+            &signed_deleg.certificate,
+            &verifying_contract,
+            signed_deleg.v,
+            &signed_deleg.r,
+            &signed_deleg.s,
+        );
+        assert_eq!(recovered_root, root_id.eth_address.unwrap());
+
+        // Step 2: Action key signs intent within delegation scope
+        let intent = SovereignIntent {
+            target_contract: [0xDD; 20],
+            function_sig: fn_sig,
+            max_value: 1_000_000_000_000_000_000, // 1 ETH (within 2 ETH cap)
+            expiration: 1800000000,
+            chain_id: 1,
+            nonce: 0,
+        };
+
+        let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
+        let intent_sig = sign_intent(&intent, &verifying_contract, &action_privkey);
+
+        let recovered_action = recover_signer(&intent, &verifying_contract, &intent_sig);
+        assert_eq!(recovered_action, action_key.eth_address.unwrap());
+
+        // Verify delegation delegate matches intent signer
+        assert_eq!(signed_deleg.certificate.delegate, recovered_action);
+    }
+
     proptest! {
         #[test]
         fn prop_random_intents_produce_recoverable_signatures(
@@ -536,6 +783,36 @@ mod sovereign_tests {
             let sig = sign_intent(&intent, &verifying_contract, &privkey);
             let recovered = recover_signer(&intent, &verifying_contract, &sig);
             prop_assert_eq!(recovered, action_key.eth_address.unwrap());
+        }
+
+        #[test]
+        fn prop_delegation_always_recoverable(
+            max_val in 0u128..u128::MAX,
+            exp in 0u64..u64::MAX,
+            nonce in 0u64..10000u64,
+        ) {
+            let root = test_root();
+            let hierarchy = KeyHierarchy::new(root);
+            let root_id = hierarchy.derive_role(KeyRole::RootIdentity, 0);
+            let action_key = hierarchy.derive_role(KeyRole::Action, 0);
+
+            let verifying_contract = [0x11; 20];
+            let cert = DelegationCertificate {
+                delegate: action_key.eth_address.unwrap(),
+                scope: [0xa9, 0x05, 0x9c, 0xbb],
+                max_value: max_val,
+                expiration: exp,
+                chain_id: 1,
+                nonce,
+            };
+
+            let root_privkey: [u8; 32] = root_id.private_key.as_slice().try_into().unwrap();
+            let signed = sign_delegation(&cert, &verifying_contract, &root_privkey);
+            let recovered = recover_delegator(
+                &signed.certificate, &verifying_contract,
+                signed.v, &signed.r, &signed.s,
+            );
+            prop_assert_eq!(recovered, root_id.eth_address.unwrap());
         }
     }
 }

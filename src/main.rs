@@ -2,6 +2,7 @@ use huntkey::{
     derive_key, generate_mnemonic, root_from_mnemonic,
     KeyHierarchy, KeyRole, SovereignIntent,
     sign_intent, recover_signer, role_path,
+    DelegationCertificate, sign_delegation, recover_delegator,
 };
 
 fn main() {
@@ -69,9 +70,10 @@ fn main() {
 
     // Build and sign a sample intent
     let verifying_contract = [0xAA; 20];
+    let fn_sig = [0xa9, 0x05, 0x9c, 0xbb]; // transfer(address,uint256)
     let intent = SovereignIntent {
         target_contract: [0xBB; 20],
-        function_sig: [0xa9, 0x05, 0x9c, 0xbb], // transfer(address,uint256)
+        function_sig: fn_sig,
         max_value: 1_000_000_000_000_000_000, // 1 ETH in wei
         expiration: 1800000000,
         chain_id: 1,
@@ -86,8 +88,8 @@ fn main() {
     println!("  Chain ID  : {}", intent.chain_id);
     println!("  Nonce     : {}", intent.nonce);
 
-    let privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
-    let sig = sign_intent(&intent, &verifying_contract, &privkey);
+    let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
+    let sig = sign_intent(&intent, &verifying_contract, &action_privkey);
 
     println!("\n  --- EIP-712 Signature ---");
     println!("  v : {}", sig.v);
@@ -103,6 +105,62 @@ fn main() {
     println!(
         "  Match     : {}",
         if recovered == expected { "YES" } else { "NO" }
+    );
+
+    // --- Delegated Access Control ---
+    println!("\n========================================");
+    println!("  Delegated Access Control");
+    println!("========================================");
+
+    // Root endorses action key with a delegation certificate
+    let cert = DelegationCertificate {
+        delegate: action_key.eth_address.unwrap(),
+        scope: fn_sig,
+        max_value: 2_000_000_000_000_000_000, // 2 ETH cap
+        expiration: 1900000000,
+        chain_id: 1,
+        nonce: 0,
+    };
+
+    println!("\n  --- Delegation Certificate ---");
+    println!("  Delegate  : 0x{}", hex::encode(cert.delegate));
+    println!("  Scope     : 0x{}", hex::encode(cert.scope));
+    println!("  Max Value : {} wei", cert.max_value);
+    println!("  Expiry    : {}", cert.expiration);
+    println!("  Chain ID  : {}", cert.chain_id);
+    println!("  Nonce     : {}", cert.nonce);
+
+    let root_privkey: [u8; 32] = root_id.private_key.as_slice().try_into().unwrap();
+    let deleg_sig = sign_delegation(&cert, &verifying_contract, &root_privkey);
+
+    println!("\n  --- Delegation Signature (by Root) ---");
+    println!("  v : {}", deleg_sig.v);
+    println!("  r : 0x{}", hex::encode(deleg_sig.r));
+    println!("  s : 0x{}", hex::encode(deleg_sig.s));
+
+    // Verify delegation
+    let recovered_root = recover_delegator(
+        &deleg_sig.certificate,
+        &verifying_contract,
+        deleg_sig.v,
+        &deleg_sig.r,
+        &deleg_sig.s,
+    );
+    println!("\n  --- Delegation Verification ---");
+    println!("  Recovered Root : 0x{}", hex::encode(recovered_root));
+    println!("  Expected Root  : 0x{}", hex::encode(root_id.eth_address.unwrap()));
+    println!(
+        "  Root Match     : {}",
+        if recovered_root == root_id.eth_address.unwrap() { "YES" } else { "NO" }
+    );
+
+    // Verify the delegation chain: delegate matches intent signer
+    println!("\n  --- Delegation Chain ---");
+    println!("  Delegate in cert : 0x{}", hex::encode(cert.delegate));
+    println!("  Intent signer    : 0x{}", hex::encode(recovered));
+    println!(
+        "  Chain Valid      : {}",
+        if cert.delegate == recovered { "YES" } else { "NO" }
     );
 
     println!();
