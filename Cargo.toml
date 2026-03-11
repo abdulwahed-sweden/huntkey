@@ -1,6 +1,10 @@
 [package]
-name = "huntloan"
+name = "huntkey"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bip39 = { version = "2.1", features = ["rand"] }
+coins-bip32 = "0.8"
+hex = "0.4"
+tiny-keccak = { version = "2.0", features = ["keccak"] }
