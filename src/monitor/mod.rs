@@ -658,3 +658,155 @@ impl Default for EventLog {
         Self::new()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Dashboard State — Aggregated Protocol Metrics
+// ---------------------------------------------------------------------------
+
+/// A snapshot of aggregated protocol metrics at a point in time.
+#[derive(Debug, Clone)]
+pub struct DashboardSnapshot {
+    /// Number of unique identities with recorded events.
+    pub active_identities: usize,
+    /// Number of identities currently in RecoveryPending state.
+    pub pending_recoveries: usize,
+    /// Total number of intents executed.
+    pub executed_intents: usize,
+    /// Number of high-value intents detected.
+    pub high_value_intents: usize,
+    /// Number of session epoch revocations (mass invalidations).
+    pub revoked_sessions: usize,
+    /// Unix timestamp when the snapshot was generated.
+    pub snapshot_timestamp: u64,
+}
+
+/// Aggregated dashboard state computed from the event log.
+pub struct DashboardState<'a> {
+    event_log: &'a EventLog,
+}
+
+impl<'a> DashboardState<'a> {
+    /// Create a new DashboardState from an event log reference.
+    pub fn new(event_log: &'a EventLog) -> Self {
+        Self { event_log }
+    }
+
+    /// Generate a snapshot of the current dashboard metrics.
+    pub fn snapshot(&self, timestamp: u64) -> DashboardSnapshot {
+        let entries = self.event_log.entries();
+
+        let mut identities = std::collections::HashSet::new();
+        let mut pending_recoveries = 0usize;
+        let mut executed_intents = 0usize;
+        let mut high_value_intents = 0usize;
+        let mut revoked_sessions = 0usize;
+
+        for entry in entries {
+            identities.insert(entry.identity);
+            match entry.event_type {
+                EventType::IntentExecuted => executed_intents += 1,
+                EventType::HighValueIntent => high_value_intents += 1,
+                EventType::SessionInvalidated => revoked_sessions += 1,
+                EventType::RecoveryStateChanged => {
+                    // Count entries where new_state is "RecoveryPending"
+                    if entry.metadata.iter().any(|(k, v)| k == "new_state" && v == "RecoveryPending") {
+                        pending_recoveries += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        DashboardSnapshot {
+            active_identities: identities.len(),
+            pending_recoveries,
+            executed_intents,
+            high_value_intents,
+            revoked_sessions,
+            snapshot_timestamp: timestamp,
+        }
+    }
+
+    /// Generate a snapshot filtered to a specific time range.
+    pub fn snapshot_in_range(&self, from: u64, to: u64, snapshot_timestamp: u64) -> DashboardSnapshot {
+        let entries = self.event_log.entries();
+
+        let mut identities = std::collections::HashSet::new();
+        let mut pending_recoveries = 0usize;
+        let mut executed_intents = 0usize;
+        let mut high_value_intents = 0usize;
+        let mut revoked_sessions = 0usize;
+
+        for entry in entries {
+            if entry.timestamp < from || entry.timestamp > to {
+                continue;
+            }
+            identities.insert(entry.identity);
+            match entry.event_type {
+                EventType::IntentExecuted => executed_intents += 1,
+                EventType::HighValueIntent => high_value_intents += 1,
+                EventType::SessionInvalidated => revoked_sessions += 1,
+                EventType::RecoveryStateChanged => {
+                    if entry.metadata.iter().any(|(k, v)| k == "new_state" && v == "RecoveryPending") {
+                        pending_recoveries += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        DashboardSnapshot {
+            active_identities: identities.len(),
+            pending_recoveries,
+            executed_intents,
+            high_value_intents,
+            revoked_sessions,
+            snapshot_timestamp,
+        }
+    }
+
+    /// Filter entries by identity.
+    pub fn entries_for_identity(&self, identity: &[u8; 20]) -> Vec<&EventLogEntry> {
+        self.event_log.entries_for_identity(identity)
+    }
+
+    /// Filter entries by event type.
+    pub fn entries_by_type(&self, event_type: EventType) -> Vec<&EventLogEntry> {
+        self.event_log.entries_by_type(event_type)
+    }
+
+    /// Filter entries by time range.
+    pub fn entries_in_range(&self, from: u64, to: u64) -> Vec<&EventLogEntry> {
+        self.event_log.entries().iter()
+            .filter(|e| e.timestamp >= from && e.timestamp <= to)
+            .collect()
+    }
+
+    /// Export the dashboard snapshot as a JSON string.
+    pub fn export_json(&self, timestamp: u64) -> String {
+        let snap = self.snapshot(timestamp);
+        format!(
+            concat!(
+                "{{\n",
+                "  \"active_identities\": {},\n",
+                "  \"pending_recoveries\": {},\n",
+                "  \"executed_intents\": {},\n",
+                "  \"high_value_intents\": {},\n",
+                "  \"revoked_sessions\": {},\n",
+                "  \"snapshot_timestamp\": {}\n",
+                "}}"
+            ),
+            snap.active_identities,
+            snap.pending_recoveries,
+            snap.executed_intents,
+            snap.high_value_intents,
+            snap.revoked_sessions,
+            snap.snapshot_timestamp,
+        )
+    }
+}
+
+/// Convenience function: generate a dashboard state JSON from an EventLog.
+pub fn export_dashboard_state(event_log: &EventLog, timestamp: u64) -> String {
+    DashboardState::new(event_log).export_json(timestamp)
+}

@@ -40,7 +40,7 @@ abstract contract IdentityStore {
     // --- EIP-712 constants ---
     bytes32 public constant INTENT_TYPEHASH =
         keccak256(
-            "SovereignIntent(address targetContract,bytes4 functionSig,address recipient,address assetAddress,bytes32 callDataHash,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce,uint64 sessionEpoch,uint64 gasLimit,uint128 maxFeePerGas,uint128 maxPriorityFeePerGas,bytes32 requiredClaim)"
+            "SovereignIntent(address targetContract,bytes4 functionSig,address recipient,address assetAddress,bytes32 callDataHash,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce,uint64 sessionEpoch,uint64 gasLimit,uint128 maxFeePerGas,uint128 maxPriorityFeePerGas,bytes32 requiredClaim,bytes32 claimProofHash,uint8 paymasterMode,address paymaster)"
         );
 
     bytes32 public constant DELEGATION_TYPEHASH =
@@ -91,6 +91,9 @@ abstract contract IdentityStore {
         uint128 maxFeePerGas;
         uint128 maxPriorityFeePerGas;
         bytes32 requiredClaim;
+        bytes32 claimProofHash;
+        uint8 paymasterMode;
+        address paymaster;
         uint8 v;
         bytes32 r;
         bytes32 s;
@@ -220,7 +223,7 @@ abstract contract IdentityStore {
     }
 
     function _intentStructHash(IntentParams calldata p) internal view returns (bytes32) {
-        // Split abi.encode into two halves to avoid stack-too-deep
+        // Split abi.encode into three parts to avoid stack-too-deep
         bytes memory first = abi.encode(
             INTENT_TYPEHASH, p.targetContract, p.functionSig,
             p.recipient, p.assetAddress, p.callDataHash,
@@ -231,7 +234,10 @@ abstract contract IdentityStore {
             p.sessionEpoch, p.gasLimit, p.maxFeePerGas,
             p.maxPriorityFeePerGas, p.requiredClaim
         );
-        return keccak256(bytes.concat(first, second));
+        bytes memory third = abi.encode(
+            p.claimProofHash, p.paymasterMode, p.paymaster
+        );
+        return keccak256(bytes.concat(first, second, third));
     }
 
     function _recoverDelegationProver(DelegationParams calldata d) internal view returns (address) {

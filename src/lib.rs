@@ -38,8 +38,9 @@ pub use recovery::{
 };
 
 pub use monitor::{
-    AlertCategory, AlertSeverity, EventLog, EventLogEntry, EventType, GuardianNotification,
-    IdentityWatcher, SecurityAlert, WatcherConfig,
+    AlertCategory, AlertSeverity, DashboardSnapshot, DashboardState, EventLog, EventLogEntry,
+    EventType, GuardianNotification, IdentityWatcher, SecurityAlert, WatcherConfig,
+    export_dashboard_state,
 };
 
 pub use sessions::{
@@ -245,6 +246,9 @@ mod sovereign_tests {
             max_fee_per_gas: 0,
             max_priority_fee_per_gas: 0,
             required_claim: [0x00; 32],
+            claim_proof_hash: [0x00; 32],
+            paymaster_mode: 0,
+            paymaster: [0x00; 20],
         };
 
         let h1 = intent_signing_hash(&intent, &contract);
@@ -274,6 +278,9 @@ mod sovereign_tests {
             max_fee_per_gas: 0,
             max_priority_fee_per_gas: 0,
             required_claim: [0x00; 32],
+            claim_proof_hash: [0x00; 32],
+            paymaster_mode: 0,
+            paymaster: [0x00; 20],
         };
 
         let privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
@@ -405,6 +412,9 @@ mod sovereign_tests {
             max_fee_per_gas: 0,
             max_priority_fee_per_gas: 0,
             required_claim: [0x00; 32],
+            claim_proof_hash: [0x00; 32],
+            paymaster_mode: 0,
+            paymaster: [0x00; 20],
         };
 
         let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
@@ -586,6 +596,9 @@ mod sovereign_tests {
                 max_fee_per_gas: 0,
                 max_priority_fee_per_gas: 0,
                 required_claim: [0x00; 32],
+                claim_proof_hash: [0x00; 32],
+                paymaster_mode: 0,
+                paymaster: [0x00; 20],
             };
 
             let privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
@@ -782,6 +795,9 @@ mod sovereign_tests {
             max_fee_per_gas: 0,
             max_priority_fee_per_gas: 0,
             required_claim: [0x00; 32],
+            claim_proof_hash: [0x00; 32],
+            paymaster_mode: 0,
+            paymaster: [0x00; 20],
         };
         let intent_sig = sign_intent(&intent, &verifying_contract, &session.private_key);
 
@@ -928,6 +944,9 @@ mod sovereign_tests {
             max_fee_per_gas: 50_000_000_000, // 50 gwei
             max_priority_fee_per_gas: 2_000_000_000, // 2 gwei tip
             required_claim: [0x00; 32],
+            claim_proof_hash: [0x00; 32],
+            paymaster_mode: 0,
+            paymaster: [0x00; 20],
         };
         let intent_sig = sign_intent(&intent, &verifying_contract, &session.private_key);
         let recovered_session = recover_signer(&intent, &verifying_contract, &intent_sig);
@@ -1292,5 +1311,226 @@ mod event_log_tests {
 
         assert_eq!(log.entries_for_identity(&id1).len(), 2);
         assert_eq!(log.entries_for_identity(&id2).len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod dashboard_tests {
+    use super::*;
+
+    #[test]
+    fn test_dashboard_snapshot_basic() {
+        let mut log = EventLog::new();
+        let id1 = [0xAA; 20];
+        let id2 = [0xBB; 20];
+
+        log.record_intent_executed(id1, [0x01; 20], [0x01; 4], 100, 1000);
+        log.record_intent_executed(id2, [0x02; 20], [0x02; 4], 101, 1001);
+        log.record_session_invalidated(id1, 1, 102, 1002);
+        log.record_high_value_intent(id1, [0x03; 20], 5_000_000, [0x01; 4], 103, 1003);
+        log.record_recovery_state_changed(id2, "RecoveryPending", Some([0xCC; 20]), 104, 1004);
+
+        let dashboard = DashboardState::new(&log);
+        let snap = dashboard.snapshot(2000);
+
+        assert_eq!(snap.active_identities, 2);
+        assert_eq!(snap.executed_intents, 2);
+        assert_eq!(snap.revoked_sessions, 1);
+        assert_eq!(snap.high_value_intents, 1);
+        assert_eq!(snap.pending_recoveries, 1);
+        assert_eq!(snap.snapshot_timestamp, 2000);
+    }
+
+    #[test]
+    fn test_dashboard_time_range_filter() {
+        let mut log = EventLog::new();
+        let id = [0xAA; 20];
+
+        log.record_intent_executed(id, [0x01; 20], [0x01; 4], 100, 1000);
+        log.record_intent_executed(id, [0x02; 20], [0x02; 4], 101, 2000);
+        log.record_intent_executed(id, [0x03; 20], [0x03; 4], 102, 3000);
+
+        let dashboard = DashboardState::new(&log);
+
+        // Only events in [1500, 2500]
+        let snap = dashboard.snapshot_in_range(1500, 2500, 4000);
+        assert_eq!(snap.executed_intents, 1);
+        assert_eq!(snap.active_identities, 1);
+
+        // All events
+        let snap_all = dashboard.snapshot_in_range(0, 5000, 4000);
+        assert_eq!(snap_all.executed_intents, 3);
+    }
+
+    #[test]
+    fn test_dashboard_export_json() {
+        let mut log = EventLog::new();
+        let id = [0xAA; 20];
+
+        log.record_intent_executed(id, [0x01; 20], [0x01; 4], 100, 1000);
+        log.record_session_invalidated(id, 1, 101, 1001);
+
+        let json = export_dashboard_state(&log, 2000);
+        assert!(json.contains("\"active_identities\": 1"));
+        assert!(json.contains("\"executed_intents\": 1"));
+        assert!(json.contains("\"revoked_sessions\": 1"));
+        assert!(json.contains("\"snapshot_timestamp\": 2000"));
+    }
+
+    #[test]
+    fn test_dashboard_entries_in_range() {
+        let mut log = EventLog::new();
+        let id = [0xAA; 20];
+
+        log.record_intent_executed(id, [0x01; 20], [0x01; 4], 100, 1000);
+        log.record_intent_executed(id, [0x02; 20], [0x02; 4], 101, 2000);
+        log.record_intent_executed(id, [0x03; 20], [0x03; 4], 102, 3000);
+
+        let dashboard = DashboardState::new(&log);
+        let entries = dashboard.entries_in_range(1500, 2500);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].timestamp, 2000);
+    }
+}
+
+#[cfg(test)]
+mod v23_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_intent_with_claim_proof_hash() {
+        let root = test_root();
+        let hierarchy = KeyHierarchy::new(root);
+        let action_key = hierarchy.derive_role(KeyRole::Action, 0);
+        let verifying_contract = [0xAA; 20];
+
+        let proof_hash = [0xDE; 32]; // non-zero claim proof hash
+        let intent = SovereignIntent {
+            target_contract: [0xBB; 20],
+            function_sig: [0xa9, 0x05, 0x9c, 0xbb],
+            recipient: [0x00; 20],
+            asset_address: [0x00; 20],
+            call_data_hash: [0x00; 32],
+            max_value: 1_000_000,
+            expiration: 1700000000,
+            chain_id: 1,
+            nonce: 0,
+            session_epoch: 0,
+            gas_limit: 0,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            required_claim: [0x01; 32],
+            claim_proof_hash: proof_hash,
+            paymaster_mode: 0,
+            paymaster: [0x00; 20],
+        };
+
+        let privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
+        let sig = sign_intent(&intent, &verifying_contract, &privkey);
+        let recovered = recover_signer(&intent, &verifying_contract, &sig);
+        assert_eq!(recovered, action_key.eth_address.unwrap());
+    }
+
+    #[test]
+    fn test_intent_with_paymaster() {
+        let root = test_root();
+        let hierarchy = KeyHierarchy::new(root);
+        let action_key = hierarchy.derive_role(KeyRole::Action, 0);
+        let verifying_contract = [0xAA; 20];
+
+        let intent = SovereignIntent {
+            target_contract: [0xBB; 20],
+            function_sig: [0xa9, 0x05, 0x9c, 0xbb],
+            recipient: [0x00; 20],
+            asset_address: [0x00; 20],
+            call_data_hash: [0x00; 32],
+            max_value: 1_000_000,
+            expiration: 1700000000,
+            chain_id: 1,
+            nonce: 0,
+            session_epoch: 0,
+            gas_limit: 100_000,
+            max_fee_per_gas: 50_000_000_000,
+            max_priority_fee_per_gas: 2_000_000_000,
+            required_claim: [0x00; 32],
+            claim_proof_hash: [0x00; 32],
+            paymaster_mode: 1, // sponsored
+            paymaster: [0xEE; 20],
+        };
+
+        let privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
+        let sig = sign_intent(&intent, &verifying_contract, &privkey);
+        let recovered = recover_signer(&intent, &verifying_contract, &sig);
+        assert_eq!(recovered, action_key.eth_address.unwrap());
+    }
+
+    #[test]
+    fn test_different_paymaster_modes_produce_different_hashes() {
+        let verifying_contract = [0xAA; 20];
+
+        let make_intent = |mode: u8, pm: [u8; 20]| SovereignIntent {
+            target_contract: [0xBB; 20],
+            function_sig: [0xa9, 0x05, 0x9c, 0xbb],
+            recipient: [0x00; 20],
+            asset_address: [0x00; 20],
+            call_data_hash: [0x00; 32],
+            max_value: 1_000_000,
+            expiration: 1700000000,
+            chain_id: 1,
+            nonce: 0,
+            session_epoch: 0,
+            gas_limit: 0,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            required_claim: [0x00; 32],
+            claim_proof_hash: [0x00; 32],
+            paymaster_mode: mode,
+            paymaster: pm,
+        };
+
+        let h0 = intent_signing_hash(&make_intent(0, [0x00; 20]), &verifying_contract);
+        let h1 = intent_signing_hash(&make_intent(1, [0x00; 20]), &verifying_contract);
+        let h2 = intent_signing_hash(&make_intent(1, [0xEE; 20]), &verifying_contract);
+
+        assert_ne!(h0, h1, "different modes must produce different hashes");
+        assert_ne!(h1, h2, "different paymaster addresses must produce different hashes");
+    }
+
+    #[test]
+    fn test_claim_proof_hash_binding() {
+        let verifying_contract = [0xAA; 20];
+
+        let make_intent = |proof: [u8; 32]| SovereignIntent {
+            target_contract: [0xBB; 20],
+            function_sig: [0xa9, 0x05, 0x9c, 0xbb],
+            recipient: [0x00; 20],
+            asset_address: [0x00; 20],
+            call_data_hash: [0x00; 32],
+            max_value: 1_000_000,
+            expiration: 1700000000,
+            chain_id: 1,
+            nonce: 0,
+            session_epoch: 0,
+            gas_limit: 0,
+            max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
+            required_claim: [0x00; 32],
+            claim_proof_hash: proof,
+            paymaster_mode: 0,
+            paymaster: [0x00; 20],
+        };
+
+        let h1 = intent_signing_hash(&make_intent([0x00; 32]), &verifying_contract);
+        let h2 = intent_signing_hash(&make_intent([0xAA; 32]), &verifying_contract);
+
+        assert_ne!(h1, h2, "different claim proof hashes must produce different signing hashes");
+    }
+
+    fn test_root() -> coins_bip32::xkeys::XPriv {
+        let mnemonic = Mnemonic::from_str(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        ).unwrap();
+        root_from_mnemonic(&mnemonic)
     }
 }

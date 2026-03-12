@@ -41,7 +41,7 @@ contract ExecutionGatewayTest is Test {
         guard.authorizeKey(actionSigner);
     }
 
-    /// @dev Build the EIP-712 intent digest (defaults sessionEpoch/gasLimit/maxFeePerGas/requiredClaim to zero).
+    /// @dev Build the EIP-712 intent digest (defaults sessionEpoch/gasLimit/maxFeePerGas/requiredClaim/claim/paymaster to zero).
     function _digest(
         address targetContract,
         bytes4 functionSig,
@@ -53,35 +53,19 @@ contract ExecutionGatewayTest is Test {
         uint64 intentChainId,
         uint64 nonce
     ) internal view returns (bytes32) {
-        return _digestFull(targetContract, functionSig, recipient, assetAddress, dataHash, maxValue, expiration, intentChainId, nonce, 0, 0, 0, 0, bytes32(0));
-    }
-
-    function _digestFull(
-        address targetContract,
-        bytes4 functionSig,
-        address recipient,
-        address assetAddress,
-        bytes32 dataHash,
-        uint128 maxValue,
-        uint64 expiration,
-        uint64 intentChainId,
-        uint64 nonce,
-        uint64 intentSessionEpoch,
-        uint64 gasLimit,
-        uint128 maxFeePerGas,
-        uint128 maxPriorityFeePerGas,
-        bytes32 requiredClaim
-    ) internal view returns (bytes32) {
         bytes memory first = abi.encode(
             guard.INTENT_TYPEHASH(), targetContract, functionSig,
             recipient, assetAddress, dataHash, maxValue
         );
         bytes memory second = abi.encode(
             expiration, intentChainId, nonce,
-            intentSessionEpoch, gasLimit, maxFeePerGas,
-            maxPriorityFeePerGas, requiredClaim
+            uint64(0), uint64(0), uint128(0),
+            uint128(0), bytes32(0)
         );
-        bytes32 structHash = keccak256(bytes.concat(first, second));
+        bytes memory third = abi.encode(
+            bytes32(0), uint8(0), address(0)
+        );
+        bytes32 structHash = keccak256(bytes.concat(first, second, third));
         return keccak256(
             abi.encodePacked("\x19\x01", guard.DOMAIN_SEPARATOR(), structHash)
         );
@@ -171,7 +155,8 @@ contract ExecutionGatewayTest is Test {
             assetAddress: asset, callDataHash: dataHash, maxValue: maxVal,
             expiration: exp, chainId: chainId, nonce: nonce,
             sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, maxPriorityFeePerGas: 0,
-            requiredClaim: bytes32(0), v: v, r: r, s: s
+            requiredClaim: bytes32(0), claimProofHash: bytes32(0), paymasterMode: 0, paymaster: address(0),
+            v: v, r: r, s: s
         });
     }
 
@@ -373,6 +358,9 @@ contract ExecutionGatewayTest is Test {
             maxFeePerGas: 0,
             maxPriorityFeePerGas: 0,
             requiredClaim: bytes32(0),
+            claimProofHash: bytes32(0),
+            paymasterMode: 0,
+            paymaster: address(0),
             v: iV,
             r: iR,
             s: iS
@@ -433,6 +421,7 @@ contract ExecutionGatewayTest is Test {
             recipient: address(0), assetAddress: address(0), callDataHash: dataHash,
             maxValue: 0.5 ether, expiration: exp, chainId: chainId, nonce: 0,
             sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, maxPriorityFeePerGas: 0, requiredClaim: bytes32(0),
+            claimProofHash: bytes32(0), paymasterMode: 0, paymaster: address(0),
             v: iV, r: iR, s: iS
         });
 
@@ -710,6 +699,9 @@ contract ExecutionGatewayTest is Test {
             maxFeePerGas: 0,
             maxPriorityFeePerGas: 0,
             requiredClaim: bytes32(0),
+            claimProofHash: bytes32(0),
+            paymasterMode: 0,
+            paymaster: address(0),
             v: iV,
             r: iR,
             s: iS
@@ -842,6 +834,7 @@ contract ExecutionGatewayTest is Test {
             recipient: address(0), assetAddress: address(0), callDataHash: dataHash,
             maxValue: 0.5 ether, expiration: exp, chainId: chainId, nonce: 0,
             sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, maxPriorityFeePerGas: 0, requiredClaim: bytes32(0),
+            claimProofHash: bytes32(0), paymasterMode: 0, paymaster: address(0),
             v: iV, r: iR, s: iS
         });
 
@@ -926,6 +919,7 @@ contract ExecutionGatewayTest is Test {
             recipient: address(0), assetAddress: address(0), callDataHash: dataHash,
             maxValue: 0.5 ether, expiration: exp, chainId: chainId, nonce: 0,
             sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, maxPriorityFeePerGas: 0, requiredClaim: bytes32(0),
+            claimProofHash: bytes32(0), paymasterMode: 0, paymaster: address(0),
             v: iV, r: iR, s: iS
         });
 
@@ -1046,7 +1040,10 @@ contract HuntKeyAccountTest is Test {
             intentSessionEpoch, gasLimit, maxFeePerGas,
             maxPriorityFeePerGas, requiredClaim
         );
-        bytes32 structHash = keccak256(bytes.concat(first, second));
+        bytes memory third = abi.encode(
+            bytes32(0), uint8(0), address(0)
+        );
+        bytes32 structHash = keccak256(bytes.concat(first, second, third));
         return keccak256(
             abi.encodePacked("\x19\x01", account.DOMAIN_SEPARATOR(), structHash)
         );
@@ -1130,6 +1127,9 @@ contract HuntKeyAccountTest is Test {
             maxFeePerGas: maxFeePerGas,
             maxPriorityFeePerGas: 0,
             requiredClaim: requiredClaim,
+            claimProofHash: bytes32(0),
+            paymasterMode: 0,
+            paymaster: address(0),
             v: iV,
             r: iR,
             s: iS
@@ -1344,6 +1344,9 @@ contract HuntKeyAccountTest is Test {
             maxFeePerGas: 0,
             maxPriorityFeePerGas: 0,
             requiredClaim: bytes32(0),
+            claimProofHash: bytes32(0),
+            paymasterMode: 0,
+            paymaster: address(0),
             v: iV,
             r: iR,
             s: iS
@@ -1392,6 +1395,7 @@ contract HuntKeyAccountTest is Test {
             recipient: address(0), assetAddress: address(0), callDataHash: wrongHash,
             maxValue: 1 ether, expiration: exp, chainId: chainId, nonce: 0,
             sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, maxPriorityFeePerGas: 0, requiredClaim: bytes32(0),
+            claimProofHash: bytes32(0), paymasterMode: 0, paymaster: address(0),
             v: iV, r: iR, s: iS
         });
 
@@ -1589,6 +1593,7 @@ contract HuntKeyAccountTest is Test {
             recipient: address(0), assetAddress: address(0), callDataHash: multicallHash,
             maxValue: 1 ether, expiration: exp, chainId: chainId, nonce: 0,
             sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, maxPriorityFeePerGas: 0, requiredClaim: bytes32(0),
+            claimProofHash: bytes32(0), paymasterMode: 0, paymaster: address(0),
             v: iV, r: iR, s: iS
         });
 
@@ -1665,4 +1670,264 @@ contract MockEntryPoint {
     }
 
     receive() external payable {}
+}
+
+// ==========================================================================
+// v2.3 — ClaimVerifier Tests
+// ==========================================================================
+
+import {ClaimVerifier} from "../src/ClaimVerifier.sol";
+
+contract ClaimVerifierTest is Test {
+    ClaimVerifier verifier;
+    address issuer;
+    address alice = address(0xA11CE);
+
+    function setUp() public {
+        issuer = address(this);
+        verifier = new ClaimVerifier(issuer);
+    }
+
+    function testRegisterAndHasClaim() public {
+        bytes32 claimType = verifier.AGE_OVER_18();
+        bytes32 commitment = keccak256(abi.encodePacked(alice, claimType, bytes32(uint256(42))));
+
+        verifier.registerClaim(alice, claimType, commitment);
+        assertTrue(verifier.hasClaim(alice, claimType));
+    }
+
+    function testVerifyClaimProof() public {
+        bytes32 claimType = verifier.KYC_VERIFIED();
+        bytes32 secret = bytes32(uint256(12345));
+        bytes32 commitment = keccak256(abi.encodePacked(alice, claimType, secret));
+
+        verifier.registerClaim(alice, claimType, commitment);
+
+        bytes32 proofHash = verifier.verifyClaimProof(alice, claimType, secret);
+        assertEq(proofHash, commitment);
+        assertTrue(verifier.usedProofs(proofHash));
+    }
+
+    function testRevertInvalidProof() public {
+        bytes32 claimType = verifier.AGE_OVER_18();
+        bytes32 secret = bytes32(uint256(42));
+        bytes32 commitment = keccak256(abi.encodePacked(alice, claimType, secret));
+
+        verifier.registerClaim(alice, claimType, commitment);
+
+        bytes32 wrongSecret = bytes32(uint256(999));
+        vm.expectRevert(ClaimVerifier.InvalidProof.selector);
+        verifier.verifyClaimProof(alice, claimType, wrongSecret);
+    }
+
+    function testRevertProofReplay() public {
+        bytes32 claimType = verifier.DAO_MEMBER();
+        bytes32 secret = bytes32(uint256(77));
+        bytes32 commitment = keccak256(abi.encodePacked(alice, claimType, secret));
+
+        verifier.registerClaim(alice, claimType, commitment);
+        verifier.verifyClaimProof(alice, claimType, secret);
+
+        vm.expectRevert(ClaimVerifier.ProofAlreadyUsed.selector);
+        verifier.verifyClaimProof(alice, claimType, secret);
+    }
+
+    function testRevertClaimNotRegistered() public {
+        bytes32 claimType = verifier.COUNTRY_ALLOWED();
+
+        vm.expectRevert(ClaimVerifier.ClaimNotRegistered.selector);
+        verifier.verifyClaimProof(alice, claimType, bytes32(uint256(1)));
+    }
+
+    function testRevokeClaim() public {
+        bytes32 claimType = verifier.AGE_OVER_18();
+        bytes32 commitment = keccak256(abi.encodePacked(alice, claimType, bytes32(uint256(1))));
+
+        verifier.registerClaim(alice, claimType, commitment);
+        assertTrue(verifier.hasClaim(alice, claimType));
+
+        verifier.revokeClaim(alice, claimType);
+        assertFalse(verifier.hasClaim(alice, claimType));
+    }
+
+    function testOnlyIssuerCanRegister() public {
+        bytes32 claimType = verifier.AGE_OVER_18();
+
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(ClaimVerifier.OnlyIssuer.selector);
+        verifier.registerClaim(alice, claimType, bytes32(uint256(1)));
+    }
+
+    function testVerifyProofHashView() public {
+        bytes32 claimType = verifier.KYC_VERIFIED();
+        bytes32 secret = bytes32(uint256(42));
+        bytes32 commitment = keccak256(abi.encodePacked(alice, claimType, secret));
+
+        verifier.registerClaim(alice, claimType, commitment);
+
+        assertTrue(verifier.verifyProofHash(alice, claimType, commitment));
+        assertFalse(verifier.verifyProofHash(alice, claimType, bytes32(uint256(999))));
+    }
+
+    function testClaimTypeConstants() public view {
+        assertEq(verifier.AGE_OVER_18(), keccak256("AGE_OVER_18"));
+        assertEq(verifier.KYC_VERIFIED(), keccak256("KYC_VERIFIED"));
+        assertEq(verifier.COUNTRY_ALLOWED(), keccak256("COUNTRY_ALLOWED"));
+        assertEq(verifier.DAO_MEMBER(), keccak256("DAO_MEMBER"));
+    }
+}
+
+// ==========================================================================
+// v2.3 — HuntKeyPaymaster Tests
+// ==========================================================================
+
+import {HuntKeyPaymaster} from "../src/HuntKeyPaymaster.sol";
+import {IPaymaster, PostOpMode} from "../src/IPaymaster.sol";
+
+/// @dev Mock ERC20 token for paymaster tests
+contract MockERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        require(allowance[from][msg.sender] >= amount, "insufficient allowance");
+        require(balanceOf[from] >= amount, "insufficient balance");
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+}
+
+contract HuntKeyPaymasterTest is Test {
+    HuntKeyPaymaster paymaster;
+    MockEntryPoint entryPoint;
+    MockERC20 token;
+    address alice = address(0xA11CE);
+
+    function setUp() public {
+        entryPoint = new MockEntryPoint();
+        paymaster = new HuntKeyPaymaster(address(entryPoint));
+        token = new MockERC20();
+
+        vm.deal(address(paymaster), 10 ether);
+    }
+
+    function _buildUserOp(address sender, uint8 mode, address tokenAddr) internal pure returns (PackedUserOperation memory) {
+        bytes memory paymasterAndData;
+        if (mode == 2) {
+            paymasterAndData = abi.encodePacked(address(0), mode, tokenAddr);
+        } else {
+            paymasterAndData = abi.encodePacked(address(0), mode);
+        }
+
+        return PackedUserOperation({
+            sender: sender,
+            nonce: 0,
+            initCode: new bytes(0),
+            callData: new bytes(0),
+            accountGasLimits: bytes32(0),
+            preVerificationGas: 0,
+            gasFees: bytes32(0),
+            paymasterAndData: paymasterAndData,
+            signature: new bytes(0)
+        });
+    }
+
+    function testSponsoredMode() public {
+        paymaster.setSponsoredAccount(alice, true);
+
+        PackedUserOperation memory op = _buildUserOp(alice, 1, address(0));
+
+        vm.prank(address(entryPoint));
+        (bytes memory context, uint256 validationData) = paymaster.validatePaymasterUserOp(op, bytes32(0), 0.1 ether);
+
+        assertEq(validationData, 0);
+        assertEq(context.length, 0);
+    }
+
+    function testSponsoredModeRejectUnsponsored() public {
+        PackedUserOperation memory op = _buildUserOp(alice, 1, address(0));
+
+        vm.prank(address(entryPoint));
+        vm.expectRevert(HuntKeyPaymaster.AccountNotSponsored.selector);
+        paymaster.validatePaymasterUserOp(op, bytes32(0), 0.1 ether);
+    }
+
+    function testTokenPayMode() public {
+        paymaster.setTokenGasPrice(address(token), 1e15); // 0.001 token per gas unit
+
+        PackedUserOperation memory op = _buildUserOp(alice, 2, address(token));
+
+        vm.prank(address(entryPoint));
+        (bytes memory context, uint256 validationData) = paymaster.validatePaymasterUserOp(op, bytes32(0), 0.1 ether);
+
+        assertEq(validationData, 0);
+        assertTrue(context.length > 0);
+    }
+
+    function testTokenPayRejectUnconfigured() public {
+        PackedUserOperation memory op = _buildUserOp(alice, 2, address(token));
+
+        vm.prank(address(entryPoint));
+        vm.expectRevert(HuntKeyPaymaster.TokenNotAllowed.selector);
+        paymaster.validatePaymasterUserOp(op, bytes32(0), 0.1 ether);
+    }
+
+    function testUnsupportedModeReverts() public {
+        PackedUserOperation memory op = _buildUserOp(alice, 0, address(0));
+
+        vm.prank(address(entryPoint));
+        vm.expectRevert(HuntKeyPaymaster.UnsupportedMode.selector);
+        paymaster.validatePaymasterUserOp(op, bytes32(0), 0.1 ether);
+    }
+
+    function testOnlyEntryPoint() public {
+        PackedUserOperation memory op = _buildUserOp(alice, 1, address(0));
+
+        vm.expectRevert(HuntKeyPaymaster.OnlyEntryPoint.selector);
+        paymaster.validatePaymasterUserOp(op, bytes32(0), 0.1 ether);
+    }
+
+    function testDeposit() public {
+        paymaster.deposit{value: 1 ether}();
+        assertEq(entryPoint.deposits(address(paymaster)), 1 ether);
+    }
+
+    function testWithdrawOnlyOwner() public {
+        paymaster.deposit{value: 1 ether}();
+
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(HuntKeyPaymaster.OnlyOwner.selector);
+        paymaster.withdraw(payable(address(0xBEEF)), 0.5 ether);
+    }
+
+    function testPostOpTokenCollection() public {
+        paymaster.setTokenGasPrice(address(token), 1e18); // 1:1 ratio
+
+        // Give alice tokens and approve paymaster
+        token.mint(alice, 10 ether);
+        vm.prank(alice);
+        token.approve(address(paymaster), 10 ether);
+
+        // Simulate postOp with context from token pay mode
+        bytes memory context = abi.encode(alice, address(token), uint256(1 ether));
+        uint256 actualGasCost = 0.5 ether; // gas cost in ETH
+
+        vm.prank(address(entryPoint));
+        paymaster.postOp(PostOpMode.opSucceeded, context, actualGasCost, 0);
+
+        // Token amount = (0.5 ether * 1e18) / 1e18 = 0.5 ether in tokens
+        assertEq(token.balanceOf(address(paymaster)), 0.5 ether);
+        assertEq(token.balanceOf(alice), 9.5 ether);
+    }
 }

@@ -35,6 +35,9 @@ pub fn create_intent_wasm(
     max_fee_per_gas: &str,
     max_priority_fee_per_gas: &str,
     required_claim_hex: &str,
+    claim_proof_hash_hex: &str,
+    paymaster_mode: u8,
+    paymaster_hex: &str,
 ) -> Result<String, JsValue> {
     let target: [u8; 20] = hex_to_array(target_contract)?;
     let fn_sig: [u8; 4] = hex_to_array(function_sig)?;
@@ -42,6 +45,8 @@ pub fn create_intent_wasm(
     let asset: [u8; 20] = hex_to_array(asset_address)?;
     let data_hash: [u8; 32] = hex_to_array(call_data_hash_hex)?;
     let req_claim: [u8; 32] = hex_to_array(required_claim_hex)?;
+    let proof_hash: [u8; 32] = hex_to_array(claim_proof_hash_hex)?;
+    let pm_addr: [u8; 20] = hex_to_array(paymaster_hex)?;
     let max_val: u128 = max_value
         .parse()
         .map_err(|e| JsValue::from_str(&format!("invalid max_value: {}", e)))?;
@@ -67,6 +72,9 @@ pub fn create_intent_wasm(
         max_fee_per_gas: max_fee,
         max_priority_fee_per_gas: max_priority_fee,
         required_claim: req_claim,
+        claim_proof_hash: proof_hash,
+        paymaster_mode,
+        paymaster: pm_addr,
     };
 
     serde_json::to_string(&serde_json::json!({
@@ -84,6 +92,9 @@ pub fn create_intent_wasm(
         "max_fee_per_gas": intent.max_fee_per_gas.to_string(),
         "max_priority_fee_per_gas": intent.max_priority_fee_per_gas.to_string(),
         "required_claim": hex::encode(intent.required_claim),
+        "claim_proof_hash": hex::encode(intent.claim_proof_hash),
+        "paymaster_mode": intent.paymaster_mode,
+        "paymaster": hex::encode(intent.paymaster),
     }))
     .map_err(|e| JsValue::from_str(&format!("serialization failed: {}", e)))
 }

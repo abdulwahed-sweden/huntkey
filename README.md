@@ -11,7 +11,7 @@ BIP-39 Mnemonic
   └─ Root Identity (m/999'/0') ── cold storage, signs delegation certs
        ├─ Action Key (m/999'/1'/i) ── warm, scoped by selector + value cap
        │    └─ Session Key (HKDF) ── ephemeral, one-time use, burned after execute()
-       │         └─ Signs SovereignIntent v2.0 ── calldata hash + gas params + credential binding
+       │         └─ Signs SovereignIntent v2.3 ── calldata hash + gas params + credential binding
        │              ├─ ExecutionGateway.execute() ── direct on-chain policy firewall
        │              └─ HuntKeyAccount.validateUserOp() ── ERC-4337 Account Abstraction
        └─ Recovery Keys (m/999'/3'/i) ── 2-of-N guardians + 48h timelock
@@ -36,7 +36,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete technical specification.
 - **Multicall Execution** — `executeMulticall()` supports batched calls with `keccak256(abi.encode(calls))` hash verification across the entire batch, bound to the intent's `callDataHash`.
 - **Credential/Claim System** — `requiredClaim` field in SovereignIntent gates operations on verifiable claims. `userClaims` mapping with `bytes32(0)` bypass for unrestricted operations.
 - **Identity Monitoring** — `IdentityWatcher` tracks on-chain events and generates security alerts at Info/Warning/Critical severity. Detects unknown guardian recovery, unauthorized delegation, and offline session issuance.
-- **Gas Parameter Binding** — `gasLimit` and `maxFeePerGas` fields in SovereignIntent v2.0, signed into the EIP-712 struct for ERC-4337 integration.
+- **Gas Parameter Binding** — `gasLimit` and `maxFeePerGas` fields in SovereignIntent v2.3, signed into the EIP-712 struct for ERC-4337 integration.
 - **Session Epoch Mass Invalidation** — `sessionEpoch` field in SovereignIntent v2.1 must match on-chain `sessionEpoch[root]`. Incrementing the epoch instantly invalidates all outstanding sessions and intents without per-key revocation.
 - **Recovery-Gated UserOps** — During `RecoveryPending`, `validateUserOp` blocks all operations except recovery management (`cancelRecovery`, `supportRecovery`, `finalizeRecovery`). Returns packed `validationData` (authorizer | validUntil | validAfter) per ERC-4337 spec.
 - **Guardian Notifications** — `IdentityWatcher` generates real-time `GuardianNotification` alerts for recovery events and high-value intent execution above configurable thresholds. Drain-based consumption pattern for async notification services.
@@ -45,6 +45,12 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete technical specification.
 - **maxPriorityFeePerGas Binding** — SovereignIntent v2.2 signs `maxPriorityFeePerGas` into the EIP-712 struct, preventing malicious bundlers from siphoning gas via inflated priority fees.
 - **Event Log (Black Box)** — `EventLog` records every IntentExecuted, SessionInvalidated, RecoveryStateChanged, and HighValueIntent event into a structured, exportable JSON format for dashboard consumption and forensic analysis.
 - **ProtocolAuditor** — TypeScript SDK class for querying on-chain identity state, session epoch revocation status, and recovery state via raw `eth_call`.
+- **ZK Claim System** — `ClaimVerifier.sol` implements commitment-based ZK claim verification with 4 claim types (AGE_OVER_18, KYC_VERIFIED, COUNTRY_ALLOWED, DAO_MEMBER). Claims are registered as hash commitments and verified on-chain with replay protection.
+- **claimProofHash Binding** — SovereignIntent v2.3 signs `claimProofHash` into the EIP-712 struct, binding verified ZK proofs to specific intents.
+- **Full ERC-4337 Paymaster** — `HuntKeyPaymaster.sol` implements `IPaymaster` with three modes: self-funded (0), ETH sponsorship (1), and ERC20 token payment (2). Includes deposit management, token gas pricing, and post-op token collection.
+- **Paymaster Binding** — SovereignIntent v2.3 signs `paymasterMode` and `paymaster` address into the EIP-712 struct, preventing mode downgrade and paymaster substitution attacks.
+- **Monitoring Dashboard** — `DashboardState` aggregates EventLog data into `DashboardSnapshot` metrics: active identities, pending recoveries, executed intents, high-value intents, revoked sessions. Supports time-range filtering and JSON export.
+- **SDK v2.3** — `ClaimManager` for ZK claim queries, `PaymasterClient` for paymaster interaction and `paymasterAndData` construction, `ProtocolDashboard` for batch identity state queries.
 
 ## Security Properties
 
@@ -61,7 +67,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete technical specification.
 src/
 ├── lib.rs                 Crate root, re-exports, 52 integration tests
 ├── core/mod.rs            Key derivation, keccak256, ABI encoding
-├── intents/mod.rs         SovereignIntent v2.0, DelegationCertificate, EIP-712
+├── intents/mod.rs         SovereignIntent v2.3, DelegationCertificate, EIP-712
 ├── sessions/mod.rs        SessionKey (HKDF-SHA256), session certificates
 ├── recovery/mod.rs        RecoveryRequest, PendingRecovery, guardian signing
 ├── monitor/mod.rs         IdentityWatcher, SecurityAlert, event tracking
@@ -72,7 +78,10 @@ contracts/
 ├── src/ExecutionGateway.sol   Session validation, scope enforcement, execution
 ├── src/IAccount.sol           ERC-4337 IAccount interface
 ├── src/HuntKeyAccount.sol     ERC-4337 account + claims + multicall
-└── test/PolicyGuard.t.sol     48 Solidity tests
+├── src/ClaimVerifier.sol      ZK claim commitment verification
+├── src/IPaymaster.sol         ERC-4337 IPaymaster interface
+├── src/HuntKeyPaymaster.sol   Paymaster: sponsored + ERC20 token payment
+└── test/PolicyGuard.t.sol     66 Solidity tests
 
 sdk/ts/src/
 └── index.ts               TypeScript SDK (MnemonicManager, IntentSigner, SessionManager)
@@ -97,22 +106,22 @@ cargo run
 
 Outputs the full protocol flow: mnemonic generation, key hierarchy, delegation certificates, session keys, and 3-layer signing chain verification.
 
-### Run Rust Tests (52 tests)
+### Run Rust Tests (60 tests)
 
 ```bash
 cargo test
 ```
 
-Covers: key derivation, EIP-712 hash determinism, sign/recover roundtrips, delegation chain verification, recovery threshold/timelock, session key HKDF derivation, cross-chain isolation, identity monitoring alerts, guardian notifications, high-value intent detection, UserOperation builder packing, event log recording/export, and full end-to-end protocol flow. Includes property-based tests via proptest.
+Covers: key derivation, EIP-712 hash determinism, sign/recover roundtrips, delegation chain verification, recovery threshold/timelock, session key HKDF derivation, cross-chain isolation, identity monitoring alerts, guardian notifications, high-value intent detection, UserOperation builder packing, event log recording/export, dashboard snapshot/filtering/export, claim proof hash binding, paymaster mode binding, and full end-to-end protocol flow. Includes property-based tests via proptest.
 
-### Run Solidity Tests (48 tests)
+### Run Solidity Tests (66 tests)
 
 ```bash
 cd contracts
 forge test -vv
 ```
 
-Covers: direct intent validation, delegated verification, social recovery, execution gateway (happy path, one-time use, selector/target/calldata mismatch, session expiry, value caps, calldata mutation, recovery-blocked execution), ERC-4337 validateUserOp (3-layer chain, recovery management exception, packed validationData, EntryPoint gating, pre-funding), session epoch enforcement, credential/claim checks, multicall hash verification, and paymaster deposit management.
+Covers: direct intent validation, delegated verification, social recovery, execution gateway (happy path, one-time use, selector/target/calldata mismatch, session expiry, value caps, calldata mutation, recovery-blocked execution), ERC-4337 validateUserOp (3-layer chain, recovery management exception, packed validationData, EntryPoint gating, pre-funding), session epoch enforcement, credential/claim checks, multicall hash verification, paymaster deposit management, ClaimVerifier (registration, verification, proof replay, revocation, issuer control), and HuntKeyPaymaster (sponsored mode, token pay mode, postOp collection, deposit management).
 
 ### Build WASM SDK
 
@@ -131,6 +140,9 @@ cargo build --features wasm --target wasm32-unknown-unknown
 | Document | Contents |
 |----------|----------|
 | [docs/USER_FLOW.md](docs/USER_FLOW.md) | Identity -> Delegation -> Session -> Intent -> Execution flow |
+| [docs/CLAIMS.md](docs/CLAIMS.md) | ZK claim system: commitment model, claim types, intent binding |
+| [docs/PAYMASTER.md](docs/PAYMASTER.md) | ERC-4337 paymaster: modes, token payment, intent binding |
+| [docs/DASHBOARD.md](docs/DASHBOARD.md) | Monitoring dashboard: snapshots, filtering, JSON export |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 4-layer defense model, AA integration, state machine, key hierarchy |
 | [specs/protocol_overview.md](specs/protocol_overview.md) | EIP-712 type strings, domain separator, session epoch |
 | [specs/threat_model.md](specs/threat_model.md) | 10 attack vectors with mitigations |

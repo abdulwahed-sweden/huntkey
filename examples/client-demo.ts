@@ -15,7 +15,7 @@
  * or encrypted keystore. Never hardcode private keys.
  */
 
-import { init, IntentSigner, SessionManager, ProtocolAuditor, zeroize } from "../sdk/ts/src/index";
+import { init, IntentSigner, SessionManager, ProtocolAuditor, ClaimManager, PaymasterClient, PaymasterMode, zeroize } from "../sdk/ts/src/index";
 // In production: import huntkey_wasm from "@huntkey/wasm";
 
 // --- Step 0: Initialize the WASM module ---
@@ -61,6 +61,9 @@ async function demo() {
     maxFeePerGas: "50000000000",          // 50 gwei
     maxPriorityFeePerGas: "2000000000",  // 2 gwei tip — anti-siphoning binding
     requiredClaim: "00".repeat(32),      // no claim required
+    claimProofHash: "00".repeat(32),    // no proof binding
+    paymasterMode: 0,                   // self-funded
+    paymaster: "00".repeat(20),         // no paymaster
   };
   console.log(`   Target: 0x${intent.targetContract}`);
   console.log(`   Selector: 0x${intent.functionSig}`);

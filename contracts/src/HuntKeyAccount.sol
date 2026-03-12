@@ -272,7 +272,7 @@ contract HuntKeyAccount is ExecutionGateway, IAccount {
 
     function _recoverIntentSignerMem(IntentParams memory p) internal view returns (address) {
         _validateSigParams(p.v, p.s);
-        // Split abi.encode into two halves to avoid stack-too-deep
+        // Split abi.encode into three parts to avoid stack-too-deep
         bytes memory first = abi.encode(
             INTENT_TYPEHASH, p.targetContract, p.functionSig,
             p.recipient, p.assetAddress, p.callDataHash,
@@ -283,7 +283,10 @@ contract HuntKeyAccount is ExecutionGateway, IAccount {
             p.sessionEpoch, p.gasLimit, p.maxFeePerGas,
             p.maxPriorityFeePerGas, p.requiredClaim
         );
-        bytes32 structHash = keccak256(bytes.concat(first, second));
+        bytes memory third = abi.encode(
+            p.claimProofHash, p.paymasterMode, p.paymaster
+        );
+        bytes32 structHash = keccak256(bytes.concat(first, second, third));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
         address signer = ecrecover(digest, p.v, p.r, p.s);
         if (signer == address(0)) revert EcrecoverFailed();

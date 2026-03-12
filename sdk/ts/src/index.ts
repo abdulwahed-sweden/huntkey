@@ -25,6 +25,9 @@ export interface SovereignIntent {
   maxFeePerGas: string;         // decimal wei string
   maxPriorityFeePerGas: string; // decimal wei string — anti-siphoning binding
   requiredClaim: string;        // hex, 32 bytes (zero = no claim required)
+  claimProofHash: string;       // hex, 32 bytes (zero = no proof binding)
+  paymasterMode: number;        // 0 = self-funded, 1 = sponsored, 2 = token pay
+  paymaster: string;            // hex, 20 bytes (zero = no paymaster)
 }
 
 export interface Signature {
@@ -52,6 +55,7 @@ interface HuntKeyWasm {
     expiration: number, chainId: number, nonce: number,
     sessionEpoch: number, gasLimit: number, maxFeePerGas: string,
     maxPriorityFeePerGas: string, requiredClaimHex: string,
+    claimProofHashHex: string, paymasterMode: number, paymasterHex: string,
   ): string;
 
   sign_session_cert_wasm(
@@ -169,6 +173,9 @@ export const IntentSigner = {
       params.maxFeePerGas,
       params.maxPriorityFeePerGas,
       stripHexPrefix(params.requiredClaim),
+      stripHexPrefix(params.claimProofHash),
+      params.paymasterMode,
+      stripHexPrefix(params.paymaster),
     );
   },
 };
@@ -350,5 +357,235 @@ export class ProtocolAuditor {
   async isFrozen(rootAddress: string): Promise<boolean> {
     const state = await this.getIdentityState(rootAddress);
     return state.state === 2;
+  }
+}
+
+// --- ClaimManager ---
+
+/** Claim type constants matching ClaimVerifier.sol. */
+export const ClaimTypes = {
+  AGE_OVER_18: "age_over_18",
+  KYC_VERIFIED: "kyc_verified",
+  COUNTRY_ALLOWED: "country_allowed",
+  DAO_MEMBER: "dao_member",
+} as const;
+
+export type ClaimType = (typeof ClaimTypes)[keyof typeof ClaimTypes];
+
+/**
+ * Manages ZK claim verification via ClaimVerifier.sol.
+ */
+export class ClaimManager {
+  private provider: RpcProvider;
+  private contractAddress: string;
+
+  constructor(provider: RpcProvider, contractAddress: string) {
+    this.provider = provider;
+    this.contractAddress = contractAddress;
+  }
+
+  /**
+   * Check if an account holds a registered claim of the given type.
+   *
+   * @param account - Account address (with 0x prefix).
+   * @param claimTypeHash - keccak256 of the claim type string (hex, 32 bytes, with 0x prefix).
+   * @returns True if the claim commitment exists.
+   */
+  async hasClaim(account: string, claimTypeHash: string): Promise<boolean> {
+    const addr = stripHexPrefix(account).padStart(64, "0");
+    const claim = stripHexPrefix(claimTypeHash).padStart(64, "0");
+
+    // hasClaim(address,bytes32) selector: first 4 bytes of keccak256
+    const data = await this.provider.call({
+      to: this.contractAddress,
+      data: "0x" + "eefce84a" + addr + claim, // keccak256("hasClaim(address,bytes32)")[:4]
+    });
+
+    return parseInt(stripHexPrefix(data), 16) !== 0;
+  }
+
+  /**
+   * Verify a proof hash against a registered commitment (view-only).
+   *
+   * @param account - Account address (with 0x prefix).
+   * @param claimTypeHash - keccak256 of the claim type string (hex, 32 bytes).
+   * @param proofHash - The proof hash to verify (hex, 32 bytes).
+   * @returns True if the proof hash matches the commitment.
+   */
+  async verifyProofHash(
+    account: string,
+    claimTypeHash: string,
+    proofHash: string,
+  ): Promise<boolean> {
+    const addr = stripHexPrefix(account).padStart(64, "0");
+    const claim = stripHexPrefix(claimTypeHash).padStart(64, "0");
+    const proof = stripHexPrefix(proofHash).padStart(64, "0");
+
+    // verifyProofHash(address,bytes32,bytes32) selector
+    const data = await this.provider.call({
+      to: this.contractAddress,
+      data: "0x" + "b6f0c091" + addr + claim + proof, // keccak256("verifyProofHash(address,bytes32,bytes32)")[:4]
+    });
+
+    return parseInt(stripHexPrefix(data), 16) !== 0;
+  }
+}
+
+// --- PaymasterClient ---
+
+/** Paymaster mode constants matching HuntKeyPaymaster.sol. */
+export const PaymasterMode = {
+  SELF_FUNDED: 0,
+  SPONSORED: 1,
+  TOKEN_PAY: 2,
+} as const;
+
+/**
+ * Client for interacting with HuntKeyPaymaster.sol.
+ */
+export class PaymasterClient {
+  private provider: RpcProvider;
+  private contractAddress: string;
+
+  constructor(provider: RpcProvider, contractAddress: string) {
+    this.provider = provider;
+    this.contractAddress = contractAddress;
+  }
+
+  /**
+   * Check if an account is sponsored for gas.
+   *
+   * @param account - Account address (with 0x prefix).
+   * @returns True if the account is approved for ETH sponsorship.
+   */
+  async isSponsored(account: string): Promise<boolean> {
+    const addr = stripHexPrefix(account).padStart(64, "0");
+
+    const data = await this.provider.call({
+      to: this.contractAddress,
+      data: "0x" + "facd743b" + addr, // keccak256("sponsoredAccounts(address)")[:4]
+    });
+
+    return parseInt(stripHexPrefix(data), 16) !== 0;
+  }
+
+  /**
+   * Get the paymaster's deposit balance on the EntryPoint.
+   *
+   * @returns Deposit balance in wei as bigint.
+   */
+  async getDeposit(): Promise<bigint> {
+    const data = await this.provider.call({
+      to: this.contractAddress,
+      data: "0x" + "c399ec88", // keccak256("getDeposit()")[:4]
+    });
+
+    return BigInt(data);
+  }
+
+  /**
+   * Get the gas price for a token (in token units per gas unit, scaled by 1e18).
+   *
+   * @param token - Token address (with 0x prefix).
+   * @returns Token gas price (0 if not configured).
+   */
+  async getTokenGasPrice(token: string): Promise<bigint> {
+    const addr = stripHexPrefix(token).padStart(64, "0");
+
+    const data = await this.provider.call({
+      to: this.contractAddress,
+      data: "0x" + "4de3f015" + addr, // keccak256("tokenGasPrice(address)")[:4]
+    });
+
+    return BigInt(data);
+  }
+
+  /**
+   * Build paymasterAndData bytes for a UserOperation.
+   *
+   * @param mode - Paymaster mode (0, 1, or 2).
+   * @param token - Token address for mode 2 (optional).
+   * @returns Hex-encoded paymasterAndData bytes.
+   */
+  buildPaymasterAndData(mode: number, token?: string): string {
+    const pmAddr = stripHexPrefix(this.contractAddress);
+    const modeByte = mode.toString(16).padStart(2, "0");
+
+    if (mode === PaymasterMode.TOKEN_PAY && token) {
+      return pmAddr + modeByte + stripHexPrefix(token).padStart(40, "0");
+    }
+    return pmAddr + modeByte;
+  }
+}
+
+// --- ProtocolDashboard ---
+
+/** Dashboard snapshot returned by ProtocolDashboard. */
+export interface DashboardSnapshot {
+  activeIdentities: number;
+  pendingRecoveries: number;
+  executedIntents: number;
+  highValueIntents: number;
+  revokedSessions: number;
+  snapshotTimestamp: number;
+}
+
+/**
+ * Protocol dashboard for aggregated on-chain state queries.
+ * Combines ProtocolAuditor state with event-based metrics.
+ */
+export class ProtocolDashboard {
+  private auditor: ProtocolAuditor;
+
+  constructor(auditor: ProtocolAuditor) {
+    this.auditor = auditor;
+  }
+
+  /**
+   * Get identity state for multiple root addresses.
+   *
+   * @param rootAddresses - Array of root addresses (with 0x prefix).
+   * @returns Map of address to IdentityState.
+   */
+  async batchGetIdentityState(
+    rootAddresses: string[],
+  ): Promise<Map<string, IdentityState>> {
+    const result = new Map<string, IdentityState>();
+    for (const addr of rootAddresses) {
+      const state = await this.auditor.getIdentityState(addr);
+      result.set(addr, state);
+    }
+    return result;
+  }
+
+  /**
+   * Count identities in each state from a list of root addresses.
+   *
+   * @param rootAddresses - Array of root addresses (with 0x prefix).
+   * @returns Object with counts for active, recoveryPending, and frozen.
+   */
+  async countByState(
+    rootAddresses: string[],
+  ): Promise<{ active: number; recoveryPending: number; frozen: number }> {
+    const states = await this.batchGetIdentityState(rootAddresses);
+    let active = 0,
+      recoveryPending = 0,
+      frozen = 0;
+
+    for (const state of states.values()) {
+      switch (state.state) {
+        case 0:
+          active++;
+          break;
+        case 1:
+          recoveryPending++;
+          break;
+        case 2:
+          frozen++;
+          break;
+      }
+    }
+
+    return { active, recoveryPending, frozen };
   }
 }

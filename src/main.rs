@@ -91,6 +91,9 @@ fn main() {
         max_fee_per_gas: 0,
         max_priority_fee_per_gas: 0,
         required_claim: [0x00; 32],
+        claim_proof_hash: [0x00; 32],
+        paymaster_mode: 0,
+        paymaster: [0x00; 20],
     };
 
     println!("\n  --- Signing Intent (v2) ---");
@@ -309,6 +312,9 @@ fn main() {
         max_fee_per_gas: 0,
         max_priority_fee_per_gas: 0,
         required_claim: [0x00; 32],
+        claim_proof_hash: [0x00; 32],
+        paymaster_mode: 0,
+        paymaster: [0x00; 20],
     };
 
     let session_intent_sig = sign_intent(&session_intent, &verifying_contract, &session.private_key);

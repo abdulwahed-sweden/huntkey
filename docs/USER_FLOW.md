@@ -72,7 +72,7 @@ Session keys are ephemeral -- designed for single-use execution, then discarded.
 The session key signs a `SovereignIntent` -- a fully constrained description of the on-chain action:
 
 ```
-SovereignIntent v2.2 {
+SovereignIntent v2.3 {
   targetContract:      address
   functionSig:         bytes4
   recipient:           address
@@ -87,6 +87,9 @@ SovereignIntent v2.2 {
   maxFeePerGas:        uint128
   maxPriorityFeePerGas: uint128   -- anti-siphoning: binds bundler tip
   requiredClaim:       bytes32    -- credential binding (zero = none)
+  claimProofHash:      bytes32    -- ZK proof hash binding (zero = none)
+  paymasterMode:       uint8      -- 0=self-funded, 1=sponsored, 2=token
+  paymaster:           address    -- paymaster contract (zero = none)
 }
 ```
 
