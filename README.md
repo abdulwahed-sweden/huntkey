@@ -143,6 +143,7 @@ cargo build --features wasm --target wasm32-unknown-unknown
 | [docs/CLAIMS.md](docs/CLAIMS.md) | ZK claim system: commitment model, claim types, intent binding |
 | [docs/PAYMASTER.md](docs/PAYMASTER.md) | ERC-4337 paymaster: modes, token payment, intent binding |
 | [docs/DASHBOARD.md](docs/DASHBOARD.md) | Monitoring dashboard: snapshots, filtering, JSON export |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Deployment & integration: contract deploy, SDK setup, operations |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 4-layer defense model, AA integration, state machine, key hierarchy |
 | [specs/protocol_overview.md](specs/protocol_overview.md) | EIP-712 type strings, domain separator, session epoch |
 | [specs/threat_model.md](specs/threat_model.md) | 10 attack vectors with mitigations |

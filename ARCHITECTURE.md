@@ -126,9 +126,9 @@ executeMulticall(session, intent, calls[]):
 
 All validation failures revert with gas-efficient custom errors (no string storage).
 
-## SovereignIntent v2.0
+## SovereignIntent v2.3
 
-The v2.0 intent struct adds gas parameters and credential hooks:
+The v2.3 intent struct includes gas parameters, credential hooks, ZK claims, and paymaster binding:
 
 | Field | Type | Purpose |
 |-------|------|---------|
@@ -141,9 +141,14 @@ The v2.0 intent struct adds gas parameters and credential hooks:
 | `expiration` | uint64 | Unix timestamp expiry |
 | `chainId` | uint64 | Chain binding |
 | `nonce` | uint64 | Per-signer replay prevention |
+| `sessionEpoch` | uint64 | Must match on-chain epoch (mass invalidation) |
 | `gasLimit` | uint64 | Gas limit for ERC-4337 UserOp |
 | `maxFeePerGas` | uint128 | Max fee per gas unit (wei) |
+| `maxPriorityFeePerGas` | uint128 | Max priority fee (anti-siphoning) |
 | `requiredClaim` | bytes32 | Required credential (zero = none) |
+| `claimProofHash` | bytes32 | ZK proof hash binding (zero = none) |
+| `paymasterMode` | uint8 | 0=self-funded, 1=sponsored, 2=token |
+| `paymaster` | address | Paymaster contract (zero = none) |
 
 ## Credential/Claim System
 
@@ -226,12 +231,12 @@ All private key material implements `Zeroize` and/or `ZeroizeOnDrop`:
 
 ```
 src/
-├── lib.rs              Crate root, re-exports, 41 integration tests
+├── lib.rs              Crate root, re-exports, 60 integration tests
 ├── core/mod.rs         DerivedKey, key derivation, keccak256, ABI encoding
-├── intents/mod.rs      SovereignIntent (v2.0), DelegationCertificate, EIP-712
+├── intents/mod.rs      SovereignIntent (v2.3), DelegationCertificate, EIP-712, UserOperationBuilder
 ├── sessions/mod.rs     SessionKey (Zeroize), HKDF derivation, session certs
 ├── recovery/mod.rs     RecoveryRequest, PendingRecovery, guardian signing
-├── monitor/mod.rs      IdentityWatcher, SecurityAlert, event tracking
+├── monitor/mod.rs      IdentityWatcher, SecurityAlert, EventLog, DashboardState
 └── wasm_api/mod.rs     WASM bindings (feature-gated: "wasm")
 
 contracts/
@@ -239,10 +244,14 @@ contracts/
 ├── src/ExecutionGateway.sol   Session validation, scope enforcement, execution
 ├── src/IAccount.sol           ERC-4337 IAccount interface
 ├── src/HuntKeyAccount.sol     ERC-4337 account + claims + multicall
-└── test/PolicyGuard.t.sol     40 tests across all protocol layers
+├── src/ClaimVerifier.sol      ZK claim commitment verification
+├── src/IPaymaster.sol         ERC-4337 IPaymaster interface
+├── src/HuntKeyPaymaster.sol   Paymaster: sponsored + ERC20 token payment
+└── test/PolicyGuard.t.sol     66 tests across all protocol layers
 
 sdk/ts/src/
-└── index.ts               TypeScript SDK (MnemonicManager, IntentSigner, SessionManager)
+└── index.ts               TypeScript SDK (MnemonicManager, IntentSigner, SessionManager,
+                           ProtocolAuditor, ClaimManager, PaymasterClient, ProtocolDashboard)
 
 specs/
 ├── protocol_overview.md   4-layer architecture, EIP-712 types, state machine
@@ -266,3 +275,7 @@ specs/
 | Unauthorized UserOp | 3-layer chain packed in signature, validated by `validateUserOp` |
 | Credential bypass | `requiredClaim` check enforced before execution and validation |
 | Multicall mutation | `keccak256(abi.encode(calls))` verified against intent `callDataHash` |
+| Gas siphoning | `maxPriorityFeePerGas` signed into EIP-712 struct, binds bundler tip |
+| Claim proof reuse | `usedProofs[proofHash]` prevents replay; `claimProofHash` binding in intent |
+| Paymaster substitution | `paymasterMode` + `paymaster` signed into EIP-712 struct |
+| Mode downgrade | Paymaster mode bound in signed intent; cannot change after signing |
