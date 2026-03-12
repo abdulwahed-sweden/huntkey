@@ -62,6 +62,25 @@ pub enum AlertCategory {
     ExecutionRecorded,
     /// Off-chain session issuance detected without on-chain registration.
     OfflineSessionDetected,
+    /// High-value intent executed above configured threshold.
+    HighValueIntent,
+}
+
+/// A notification destined for a specific guardian.
+#[derive(Debug, Clone)]
+pub struct GuardianNotification {
+    /// The guardian address this notification targets.
+    pub guardian: [u8; 20],
+    /// The security alert that triggered the notification.
+    pub alert: SecurityAlert,
+}
+
+/// Configuration for the identity watcher.
+#[derive(Debug, Clone)]
+pub struct WatcherConfig {
+    /// Wei threshold above which intent execution triggers a high-value alert.
+    /// Set to 0 to disable high-value alerts.
+    pub high_value_threshold: u128,
 }
 
 /// Tracks identity events and generates security alerts.
@@ -76,15 +95,34 @@ pub struct IdentityWatcher {
     known_delegates: Vec<([u8; 20], Vec<[u8; 20]>)>,
     /// Alert log.
     alerts: Vec<SecurityAlert>,
+    /// Pending guardian notifications (drained by consumers).
+    pending_notifications: Vec<GuardianNotification>,
+    /// Watcher configuration.
+    config: WatcherConfig,
 }
 
 impl IdentityWatcher {
-    /// Create a new identity watcher.
+    /// Create a new identity watcher with default configuration.
     pub fn new() -> Self {
         Self {
             known_guardians: Vec::new(),
             known_delegates: Vec::new(),
             alerts: Vec::new(),
+            pending_notifications: Vec::new(),
+            config: WatcherConfig {
+                high_value_threshold: 0,
+            },
+        }
+    }
+
+    /// Create a new identity watcher with the given configuration.
+    pub fn with_config(config: WatcherConfig) -> Self {
+        Self {
+            known_guardians: Vec::new(),
+            known_delegates: Vec::new(),
+            alerts: Vec::new(),
+            pending_notifications: Vec::new(),
+            config,
         }
     }
 
@@ -166,6 +204,12 @@ impl IdentityWatcher {
         };
 
         self.alerts.push(alert.clone());
+
+        // Notify guardians for any recovery or freeze event
+        if matches!(alert.severity, AlertSeverity::Warning | AlertSeverity::Critical) {
+            self.notify_guardians(&identity, &alert);
+        }
+
         alert
     }
 
@@ -285,6 +329,69 @@ impl IdentityWatcher {
 
         self.alerts.push(alert.clone());
         alert
+    }
+
+    /// Process a high-value intent execution event.
+    ///
+    /// Generates a Warning alert if the intent value exceeds the configured threshold.
+    /// Also triggers guardian notifications for the identity's known guardians.
+    pub fn on_high_value_intent(
+        &mut self,
+        identity: [u8; 20],
+        session_key: [u8; 20],
+        value: u128,
+        selector: [u8; 4],
+        block_number: u64,
+        timestamp: u64,
+    ) -> Option<SecurityAlert> {
+        if self.config.high_value_threshold == 0 || value < self.config.high_value_threshold {
+            return None;
+        }
+
+        let alert = SecurityAlert {
+            severity: AlertSeverity::Warning,
+            category: AlertCategory::HighValueIntent,
+            message: format!(
+                "High-value intent executed: session=0x{} selector=0x{} value={} wei identity=0x{}",
+                hex::encode(session_key),
+                hex::encode(selector),
+                value,
+                hex::encode(identity),
+            ),
+            identity,
+            block_number,
+            timestamp,
+        };
+
+        self.alerts.push(alert.clone());
+        self.notify_guardians(&identity, &alert);
+        Some(alert)
+    }
+
+    /// Notify all known guardians for an identity about a security alert.
+    fn notify_guardians(&mut self, identity: &[u8; 20], alert: &SecurityAlert) {
+        let guardians: Vec<[u8; 20]> = self
+            .known_guardians
+            .iter()
+            .filter(|(id, _)| id == identity)
+            .flat_map(|(_, gs)| gs.clone())
+            .collect();
+
+        for guardian in guardians {
+            self.pending_notifications.push(GuardianNotification {
+                guardian,
+                alert: alert.clone(),
+            });
+        }
+    }
+
+    /// Drain all pending guardian notifications.
+    ///
+    /// Returns all accumulated notifications and clears the internal queue.
+    /// In production, a consumer (e.g., push notification service, webhook dispatcher)
+    /// calls this periodically to deliver alerts to guardians.
+    pub fn drain_notifications(&mut self) -> Vec<GuardianNotification> {
+        std::mem::take(&mut self.pending_notifications)
     }
 
     /// Get all alerts generated so far.

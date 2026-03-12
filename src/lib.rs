@@ -29,7 +29,7 @@ pub use coins_bip32;
 pub use intents::{
     delegation_signing_hash, delegation_struct_hash, intent_signing_hash, intent_struct_hash,
     recover_delegator, recover_signer, sign_delegation, sign_intent, DelegationCertificate,
-    IntentSignature, SignedDelegation, SovereignIntent,
+    IntentSignature, PackedUserOperation, SignedDelegation, SovereignIntent, UserOperationBuilder,
 };
 
 pub use recovery::{
@@ -37,7 +37,10 @@ pub use recovery::{
     PendingRecovery, RecoveryRequest,
 };
 
-pub use monitor::{AlertCategory, AlertSeverity, IdentityWatcher, SecurityAlert};
+pub use monitor::{
+    AlertCategory, AlertSeverity, GuardianNotification, IdentityWatcher, SecurityAlert,
+    WatcherConfig,
+};
 
 pub use sessions::{
     derive_session_key, recover_session_signer, session_signing_hash, session_struct_hash,
@@ -237,6 +240,7 @@ mod sovereign_tests {
             expiration: 1700000000,
             chain_id: 1,
             nonce: 0,
+            session_epoch: 0,
             gas_limit: 0,
             max_fee_per_gas: 0,
             required_claim: [0x00; 32],
@@ -264,6 +268,7 @@ mod sovereign_tests {
             expiration: 1800000000,
             chain_id: 1,
             nonce: 42,
+            session_epoch: 0,
             gas_limit: 0,
             max_fee_per_gas: 0,
             required_claim: [0x00; 32],
@@ -393,6 +398,7 @@ mod sovereign_tests {
             expiration: 1800000000,
             chain_id: 1,
             nonce: 0,
+            session_epoch: 0,
             gas_limit: 0,
             max_fee_per_gas: 0,
             required_claim: [0x00; 32],
@@ -572,6 +578,7 @@ mod sovereign_tests {
                 expiration: exp,
                 chain_id: 1,
                 nonce,
+                session_epoch: 0,
                 gas_limit: 0,
                 max_fee_per_gas: 0,
                 required_claim: [0x00; 32],
@@ -766,6 +773,7 @@ mod sovereign_tests {
             expiration: 1800000000,
             chain_id: 1,
             nonce: 0,
+            session_epoch: 0,
             gas_limit: 0,
             max_fee_per_gas: 0,
             required_claim: [0x00; 32],
@@ -910,6 +918,7 @@ mod sovereign_tests {
             expiration: 1800000000,
             chain_id: 1,
             nonce: 0,
+            session_epoch: 0,
             gas_limit: 100_000,
             max_fee_per_gas: 50_000_000_000, // 50 gwei
             required_claim: [0x00; 32],
@@ -1061,5 +1070,143 @@ mod monitor_tests {
         assert_eq!(alert.severity, AlertSeverity::Warning);
         assert_eq!(alert.category, AlertCategory::IdentityFrozen);
         assert!(alert.message.contains("FROZEN"));
+    }
+
+    #[test]
+    fn test_watcher_high_value_intent() {
+        let config = WatcherConfig {
+            high_value_threshold: 1_000_000_000_000_000_000, // 1 ETH
+        };
+        let mut watcher = IdentityWatcher::with_config(config);
+        let identity = [0xAA; 20];
+        let session = [0xBB; 20];
+
+        // Below threshold — no alert
+        let result = watcher.on_high_value_intent(
+            identity, session, 500_000_000_000_000_000, [0xa9, 0x05, 0x9c, 0xbb], 100, 1000,
+        );
+        assert!(result.is_none());
+
+        // Above threshold — alert generated
+        let result = watcher.on_high_value_intent(
+            identity, session, 2_000_000_000_000_000_000, [0xa9, 0x05, 0x9c, 0xbb], 101, 1001,
+        );
+        assert!(result.is_some());
+        let alert = result.unwrap();
+        assert_eq!(alert.severity, AlertSeverity::Warning);
+        assert_eq!(alert.category, AlertCategory::HighValueIntent);
+        assert!(alert.message.contains("High-value"));
+    }
+
+    #[test]
+    fn test_watcher_guardian_notifications() {
+        let config = WatcherConfig {
+            high_value_threshold: 1_000_000_000_000_000_000,
+        };
+        let mut watcher = IdentityWatcher::with_config(config);
+        let identity = [0xAA; 20];
+        let guardian1 = [0x11; 20];
+        let guardian2 = [0x22; 20];
+
+        watcher.register_guardians(identity, vec![guardian1, guardian2, [0x33; 20]]);
+
+        // Trigger a high-value intent — should generate guardian notifications
+        watcher.on_high_value_intent(
+            identity, [0xBB; 20], 5_000_000_000_000_000_000,
+            [0xa9, 0x05, 0x9c, 0xbb], 100, 1000,
+        );
+
+        let notifications = watcher.drain_notifications();
+        assert_eq!(notifications.len(), 3, "all 3 guardians should be notified");
+        assert_eq!(notifications[0].guardian, guardian1);
+        assert_eq!(notifications[1].guardian, guardian2);
+        assert_eq!(notifications[0].alert.category, AlertCategory::HighValueIntent);
+
+        // Drain should clear
+        assert_eq!(watcher.drain_notifications().len(), 0);
+    }
+
+    #[test]
+    fn test_watcher_recovery_triggers_guardian_notifications() {
+        let mut watcher = IdentityWatcher::new();
+        let identity = [0xAA; 20];
+        let guardian = [0xBB; 20];
+
+        watcher.register_guardians(identity, vec![guardian, [0xCC; 20], [0xDD; 20]]);
+
+        // Unknown guardian recovery → Critical → should notify all guardians
+        watcher.on_recovery_state_changed(
+            identity, "RecoveryPending", Some([0xFF; 20]), 100, 1000,
+        );
+
+        let notifications = watcher.drain_notifications();
+        assert_eq!(notifications.len(), 3, "all guardians notified on critical recovery");
+        assert_eq!(notifications[0].alert.severity, AlertSeverity::Critical);
+    }
+}
+
+#[cfg(test)]
+mod userop_tests {
+    use super::*;
+
+    #[test]
+    fn test_user_operation_builder_basic() {
+        let sender = [0xAA; 20];
+        let call_data = vec![0xa9, 0x05, 0x9c, 0xbb, 0x01, 0x02];
+        let sig_payload = vec![0xDE, 0xAD];
+
+        let user_op = UserOperationBuilder::new(sender)
+            .nonce(42)
+            .call_data(call_data.clone())
+            .gas(100_000, 200_000, 50_000, 30_000_000_000, 2_000_000_000)
+            .build(sig_payload.clone());
+
+        assert_eq!(user_op.sender, sender);
+        assert_eq!(user_op.call_data, call_data);
+        assert_eq!(user_op.signature, sig_payload);
+        // Nonce packed at bytes 24..32
+        assert_eq!(&user_op.nonce[24..], &42u64.to_be_bytes());
+    }
+
+    #[test]
+    fn test_user_operation_builder_gas_packing() {
+        let sender = [0xBB; 20];
+        let call_gas: u128 = 100_000;
+        let verif_gas: u128 = 200_000;
+        let pre_gas: u128 = 50_000;
+        let max_fee: u128 = 30_000_000_000;
+        let priority_fee: u128 = 2_000_000_000;
+
+        let user_op = UserOperationBuilder::new(sender)
+            .gas(call_gas, verif_gas, pre_gas, max_fee, priority_fee)
+            .build(vec![]);
+
+        // account_gas_limits: callGasLimit (16 bytes) || verificationGasLimit (16 bytes)
+        assert_eq!(&user_op.account_gas_limits[..16], &call_gas.to_be_bytes());
+        assert_eq!(&user_op.account_gas_limits[16..], &verif_gas.to_be_bytes());
+
+        // gas_fees: maxFeePerGas (16 bytes) || maxPriorityFeePerGas (16 bytes)
+        assert_eq!(&user_op.gas_fees[..16], &max_fee.to_be_bytes());
+        assert_eq!(&user_op.gas_fees[16..], &priority_fee.to_be_bytes());
+    }
+
+    #[test]
+    fn test_user_operation_builder_default_fields() {
+        let user_op = UserOperationBuilder::new([0xCC; 20]).build(vec![]);
+
+        assert!(user_op.init_code.is_empty());
+        assert!(user_op.paymaster_and_data.is_empty());
+        assert!(user_op.call_data.is_empty());
+        assert_eq!(user_op.nonce, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_user_operation_builder_with_init_code() {
+        let init = vec![0x60, 0x00, 0x60, 0x00];
+        let user_op = UserOperationBuilder::new([0xDD; 20])
+            .init_code(init.clone())
+            .build(vec![]);
+
+        assert_eq!(user_op.init_code, init);
     }
 }

@@ -35,11 +35,12 @@ abstract contract IdentityStore {
     error ThresholdNotMet();
     error TimelockNotStarted();
     error TimelockNotExpired();
+    error SessionEpochMismatch();
 
     // --- EIP-712 constants ---
     bytes32 public constant INTENT_TYPEHASH =
         keccak256(
-            "SovereignIntent(address targetContract,bytes4 functionSig,address recipient,address assetAddress,bytes32 callDataHash,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce,uint64 gasLimit,uint128 maxFeePerGas,bytes32 requiredClaim)"
+            "SovereignIntent(address targetContract,bytes4 functionSig,address recipient,address assetAddress,bytes32 callDataHash,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce,uint64 sessionEpoch,uint64 gasLimit,uint128 maxFeePerGas,bytes32 requiredClaim)"
         );
 
     bytes32 public constant DELEGATION_TYPEHASH =
@@ -85,6 +86,7 @@ abstract contract IdentityStore {
         uint64 expiration;
         uint64 chainId;
         uint64 nonce;
+        uint64 sessionEpoch;
         uint64 gasLimit;
         uint128 maxFeePerGas;
         bytes32 requiredClaim;
@@ -209,18 +211,25 @@ abstract contract IdentityStore {
 
     function _recoverIntentSigner(IntentParams calldata p) internal view returns (address) {
         _validateSigParams(p.v, p.s);
-        bytes32 structHash = keccak256(
-            abi.encode(
-                INTENT_TYPEHASH, p.targetContract, p.functionSig,
-                p.recipient, p.assetAddress, p.callDataHash,
-                p.maxValue, p.expiration, p.chainId, p.nonce,
-                p.gasLimit, p.maxFeePerGas, p.requiredClaim
-            )
-        );
+        bytes32 structHash = _intentStructHash(p);
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
         address signer = ecrecover(digest, p.v, p.r, p.s);
         if (signer == address(0)) revert EcrecoverFailed();
         return signer;
+    }
+
+    function _intentStructHash(IntentParams calldata p) internal view returns (bytes32) {
+        // Split abi.encode into two halves to avoid stack-too-deep
+        bytes memory first = abi.encode(
+            INTENT_TYPEHASH, p.targetContract, p.functionSig,
+            p.recipient, p.assetAddress, p.callDataHash,
+            p.maxValue
+        );
+        bytes memory second = abi.encode(
+            p.expiration, p.chainId, p.nonce,
+            p.sessionEpoch, p.gasLimit, p.maxFeePerGas, p.requiredClaim
+        );
+        return keccak256(bytes.concat(first, second));
     }
 
     function _recoverDelegationProver(DelegationParams calldata d) internal view returns (address) {
@@ -247,34 +256,17 @@ abstract contract IdentityStore {
 
     // --- Direct-authorization intent validation ---
 
-    function validateIntent(
-        address targetContract, bytes4 functionSig,
-        address recipient, address assetAddress, bytes32 dataHash,
-        uint128 maxValue, uint64 expiration, uint64 intentChainId, uint64 nonce,
-        uint64 gasLimit, uint128 maxFeePerGas, bytes32 requiredClaim,
-        uint8 v, bytes32 r, bytes32 s
-    ) external payable {
-        if (block.timestamp > expiration) revert IntentExpired();
-        if (msg.value > maxValue) revert ValueExceedsCap();
-        _validateSigParams(v, s);
+    function validateIntent(IntentParams calldata p) external payable {
+        if (block.timestamp > p.expiration) revert IntentExpired();
+        if (msg.value > p.maxValue) revert ValueExceedsCap();
 
-        bytes32 structHash = keccak256(
-            abi.encode(
-                INTENT_TYPEHASH, targetContract, functionSig,
-                recipient, assetAddress, dataHash,
-                maxValue, expiration, intentChainId, nonce,
-                gasLimit, maxFeePerGas, requiredClaim
-            )
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
-
-        address signer = ecrecover(digest, v, r, s);
-        if (signer == address(0)) revert EcrecoverFailed();
+        address signer = _recoverIntentSigner(p);
         if (!authorizedKeys[signer]) revert UnauthorizedKey();
-        if (nonce != nonces[signer]) revert InvalidNonce();
+        if (p.nonce != nonces[signer]) revert InvalidNonce();
+        if (p.sessionEpoch != sessionEpoch[signer]) revert SessionEpochMismatch();
         nonces[signer]++;
 
-        emit IntentValidated(signer, targetContract, maxValue, nonce);
+        emit IntentValidated(signer, p.targetContract, p.maxValue, p.nonce);
     }
 
     // --- Delegated verification ---

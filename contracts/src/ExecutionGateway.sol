@@ -126,6 +126,9 @@ contract ExecutionGateway is IdentityStore {
         // --- Value bounds from session certificate ---
         if (intent.maxValue > session.maxValue) revert IntentExceedsSessionCap();
 
+        // --- Session epoch enforcement ---
+        if (intent.sessionEpoch != sessionEpoch[session.parent]) revert SessionEpochMismatch();
+
         // --- Forward the call ---
         (bool success, bytes memory returnData) = target.call{value: msg.value}(callData);
         if (!success) {

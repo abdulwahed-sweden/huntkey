@@ -41,7 +41,7 @@ contract ExecutionGatewayTest is Test {
         guard.authorizeKey(actionSigner);
     }
 
-    /// @dev Build the EIP-712 intent digest (v2.0 with gasLimit, maxFeePerGas, requiredClaim).
+    /// @dev Build the EIP-712 intent digest (defaults sessionEpoch/gasLimit/maxFeePerGas/requiredClaim to zero).
     function _digest(
         address targetContract,
         bytes4 functionSig,
@@ -53,7 +53,7 @@ contract ExecutionGatewayTest is Test {
         uint64 intentChainId,
         uint64 nonce
     ) internal view returns (bytes32) {
-        return _digestFull(targetContract, functionSig, recipient, assetAddress, dataHash, maxValue, expiration, intentChainId, nonce, 0, 0, bytes32(0));
+        return _digestFull(targetContract, functionSig, recipient, assetAddress, dataHash, maxValue, expiration, intentChainId, nonce, 0, 0, 0, bytes32(0));
     }
 
     function _digestFull(
@@ -66,27 +66,20 @@ contract ExecutionGatewayTest is Test {
         uint64 expiration,
         uint64 intentChainId,
         uint64 nonce,
+        uint64 intentSessionEpoch,
         uint64 gasLimit,
         uint128 maxFeePerGas,
         bytes32 requiredClaim
     ) internal view returns (bytes32) {
-        bytes32 structHash = keccak256(
-            abi.encode(
-                guard.INTENT_TYPEHASH(),
-                targetContract,
-                functionSig,
-                recipient,
-                assetAddress,
-                dataHash,
-                maxValue,
-                expiration,
-                intentChainId,
-                nonce,
-                gasLimit,
-                maxFeePerGas,
-                requiredClaim
-            )
+        bytes memory first = abi.encode(
+            guard.INTENT_TYPEHASH(), targetContract, functionSig,
+            recipient, assetAddress, dataHash, maxValue
         );
+        bytes memory second = abi.encode(
+            expiration, intentChainId, nonce,
+            intentSessionEpoch, gasLimit, maxFeePerGas, requiredClaim
+        );
+        bytes32 structHash = keccak256(bytes.concat(first, second));
         return keccak256(
             abi.encodePacked("\x19\x01", guard.DOMAIN_SEPARATOR(), structHash)
         );
@@ -165,6 +158,21 @@ contract ExecutionGatewayTest is Test {
         );
     }
 
+    /// @dev Build IntentParams struct with default sessionEpoch/gas/claim fields.
+    function _makeIntent(
+        address target, bytes4 fnSig, address recipient, address asset,
+        bytes32 dataHash, uint128 maxVal, uint64 exp, uint64 chainId, uint64 nonce,
+        uint8 v, bytes32 r, bytes32 s
+    ) internal pure returns (IdentityStore.IntentParams memory) {
+        return IdentityStore.IntentParams({
+            targetContract: target, functionSig: fnSig, recipient: recipient,
+            assetAddress: asset, callDataHash: dataHash, maxValue: maxVal,
+            expiration: exp, chainId: chainId, nonce: nonce,
+            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
+            v: v, r: r, s: s
+        });
+    }
+
     // =======================================================================
     // Direct authorization tests (updated for v2.0 intent)
     // =======================================================================
@@ -184,7 +192,7 @@ contract ExecutionGatewayTest is Test {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(ACTION_KEY, digest);
 
         guard.validateIntent{value: 0.5 ether}(
-            target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, 0, 0, bytes32(0), v, r, s
+            _makeIntent(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, v, r, s)
         );
 
         assertEq(guard.nonces(actionSigner), 1);
@@ -205,7 +213,9 @@ contract ExecutionGatewayTest is Test {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(ACTION_KEY, digest);
 
         vm.expectRevert(IdentityStore.IntentExpired.selector);
-        guard.validateIntent(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, 0, 0, bytes32(0), v, r, s);
+        guard.validateIntent(
+            _makeIntent(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, v, r, s)
+        );
     }
 
     function testRevertValueExceedsCap() public {
@@ -224,7 +234,7 @@ contract ExecutionGatewayTest is Test {
 
         vm.expectRevert(IdentityStore.ValueExceedsCap.selector);
         guard.validateIntent{value: 1 ether}(
-            target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, 0, 0, bytes32(0), v, r, s
+            _makeIntent(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, v, r, s)
         );
     }
 
@@ -245,7 +255,9 @@ contract ExecutionGatewayTest is Test {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(rogue, digest);
 
         vm.expectRevert(IdentityStore.UnauthorizedKey.selector);
-        guard.validateIntent(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, 0, 0, bytes32(0), v, r, s);
+        guard.validateIntent(
+            _makeIntent(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, v, r, s)
+        );
     }
 
     function testRevertNonceReplay() public {
@@ -262,10 +274,14 @@ contract ExecutionGatewayTest is Test {
         bytes32 digest = _digest(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(ACTION_KEY, digest);
 
-        guard.validateIntent(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, 0, 0, bytes32(0), v, r, s);
+        guard.validateIntent(
+            _makeIntent(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, v, r, s)
+        );
 
         vm.expectRevert(IdentityStore.InvalidNonce.selector);
-        guard.validateIntent(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, 0, 0, bytes32(0), v, r, s);
+        guard.validateIntent(
+            _makeIntent(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, v, r, s)
+        );
     }
 
     function testRevertMalleableSignature() public {
@@ -287,7 +303,7 @@ contract ExecutionGatewayTest is Test {
 
         vm.expectRevert(IdentityStore.MalleableSignature.selector);
         guard.validateIntent(
-            target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, 0, 0, bytes32(0), flippedV, r, flippedS
+            _makeIntent(target, fnSig, recipient, asset, dataHash, maxVal, exp, chainId, nonce, flippedV, r, flippedS)
         );
     }
 
@@ -350,6 +366,7 @@ contract ExecutionGatewayTest is Test {
             expiration: intentExp,
             chainId: chainId,
             nonce: intentNonce,
+            sessionEpoch: 0,
             gasLimit: 0,
             maxFeePerGas: 0,
             requiredClaim: bytes32(0),
@@ -412,7 +429,7 @@ contract ExecutionGatewayTest is Test {
             targetContract: address(0xCAFE), functionSig: scope,
             recipient: address(0), assetAddress: address(0), callDataHash: dataHash,
             maxValue: 0.5 ether, expiration: exp, chainId: chainId, nonce: 0,
-            gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
+            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
             v: iV, r: iR, s: iS
         });
 
@@ -685,6 +702,7 @@ contract ExecutionGatewayTest is Test {
             expiration: intentExp,
             chainId: chainId,
             nonce: intentNonce,
+            sessionEpoch: 0,
             gasLimit: 0,
             maxFeePerGas: 0,
             requiredClaim: bytes32(0),
@@ -819,7 +837,7 @@ contract ExecutionGatewayTest is Test {
             targetContract: address(dummy), functionSig: scope,
             recipient: address(0), assetAddress: address(0), callDataHash: dataHash,
             maxValue: 0.5 ether, expiration: exp, chainId: chainId, nonce: 0,
-            gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
+            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
             v: iV, r: iR, s: iS
         });
 
@@ -903,7 +921,7 @@ contract ExecutionGatewayTest is Test {
             targetContract: address(dummy), functionSig: scope,
             recipient: address(0), assetAddress: address(0), callDataHash: dataHash,
             maxValue: 0.5 ether, expiration: exp, chainId: chainId, nonce: 0,
-            gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
+            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
             v: iV, r: iR, s: iS
         });
 
@@ -994,6 +1012,11 @@ contract HuntKeyAccountTest is Test {
         vm.deal(address(account), 10 ether);
     }
 
+    /// @dev Pack ERC-4337 validationData: authorizer(160) | validUntil(48) | validAfter(48).
+    function _packValidation(bool sigFailed, uint48 validUntil, uint48 validAfter) internal pure returns (uint256) {
+        return (sigFailed ? 1 : 0) | (uint256(validUntil) << 160) | (uint256(validAfter) << 208);
+    }
+
     function _intentDigest(
         address targetContract,
         bytes4 functionSig,
@@ -1004,27 +1027,20 @@ contract HuntKeyAccountTest is Test {
         uint64 expiration,
         uint64 intentChainId,
         uint64 nonce,
+        uint64 intentSessionEpoch,
         uint64 gasLimit,
         uint128 maxFeePerGas,
         bytes32 requiredClaim
     ) internal view returns (bytes32) {
-        bytes32 structHash = keccak256(
-            abi.encode(
-                account.INTENT_TYPEHASH(),
-                targetContract,
-                functionSig,
-                recipient,
-                assetAddress,
-                dataHash,
-                maxValue,
-                expiration,
-                intentChainId,
-                nonce,
-                gasLimit,
-                maxFeePerGas,
-                requiredClaim
-            )
+        bytes memory first = abi.encode(
+            account.INTENT_TYPEHASH(), targetContract, functionSig,
+            recipient, assetAddress, dataHash, maxValue
         );
+        bytes memory second = abi.encode(
+            expiration, intentChainId, nonce,
+            intentSessionEpoch, gasLimit, maxFeePerGas, requiredClaim
+        );
+        bytes32 structHash = keccak256(bytes.concat(first, second));
         return keccak256(
             abi.encodePacked("\x19\x01", account.DOMAIN_SEPARATOR(), structHash)
         );
@@ -1090,7 +1106,7 @@ contract HuntKeyAccountTest is Test {
 
         // Intent signed by session key
         bytes32 dataHash = keccak256(callData);
-        bytes32 iDigest = _intentDigest(target, scope, address(0), address(0), dataHash, intentVal, intentExp, chainId, 0, gasLimit, maxFeePerGas, requiredClaim);
+        bytes32 iDigest = _intentDigest(target, scope, address(0), address(0), dataHash, intentVal, intentExp, chainId, 0, 0, gasLimit, maxFeePerGas, requiredClaim);
         (uint8 iV, bytes32 iR, bytes32 iS) = vm.sign(SESSION_KEY, iDigest);
 
         IdentityStore.IntentParams memory intent = IdentityStore.IntentParams({
@@ -1103,6 +1119,7 @@ contract HuntKeyAccountTest is Test {
             expiration: intentExp,
             chainId: chainId,
             nonce: 0,
+            sessionEpoch: 0,
             gasLimit: gasLimit,
             maxFeePerGas: maxFeePerGas,
             requiredClaim: requiredClaim,
@@ -1142,7 +1159,7 @@ contract HuntKeyAccountTest is Test {
 
         vm.prank(ENTRY_POINT);
         uint256 result = account.validateUserOp(userOp, keccak256("test-hash"), 0);
-        assertEq(result, 0, "validation should succeed");
+        assertEq(result, _packValidation(false, uint48(exp), 0), "validation should succeed with packed validUntil");
     }
 
     // -----------------------------------------------------------------------
@@ -1217,7 +1234,7 @@ contract HuntKeyAccountTest is Test {
 
         vm.prank(ENTRY_POINT);
         uint256 result = account.validateUserOp(userOp, keccak256("test"), 0);
-        assertEq(result, 0, "validation with claim should succeed");
+        assertEq(result, _packValidation(false, uint48(exp), 0), "validation with claim should succeed");
     }
 
     // -----------------------------------------------------------------------
@@ -1254,7 +1271,7 @@ contract HuntKeyAccountTest is Test {
 
         vm.prank(ENTRY_POINT);
         uint256 result = account.validateUserOp(userOp, keccak256("test"), 0);
-        assertEq(result, 0, "validation with gas params should succeed");
+        assertEq(result, _packValidation(false, uint48(exp), 0), "validation with gas params should succeed");
     }
 
     // -----------------------------------------------------------------------
@@ -1302,7 +1319,7 @@ contract HuntKeyAccountTest is Test {
         });
 
         // Build intent with multicall hash
-        bytes32 iDigest = _intentDigest(address(dummy), scope, address(0), address(0), multicallHash, 1 ether, exp, chainId, 0, 0, 0, bytes32(0));
+        bytes32 iDigest = _intentDigest(address(dummy), scope, address(0), address(0), multicallHash, 1 ether, exp, chainId, 0, 0, 0, 0, bytes32(0));
         (uint8 iV, bytes32 iR, bytes32 iS) = vm.sign(SESSION_KEY, iDigest);
 
         IdentityStore.IntentParams memory intent = IdentityStore.IntentParams({
@@ -1315,6 +1332,7 @@ contract HuntKeyAccountTest is Test {
             expiration: exp,
             chainId: chainId,
             nonce: 0,
+            sessionEpoch: 0,
             gasLimit: 0,
             maxFeePerGas: 0,
             requiredClaim: bytes32(0),
@@ -1358,14 +1376,14 @@ contract HuntKeyAccountTest is Test {
             maxValue: 1 ether, expiration: exp, chainId: chainId, v: sV, r: sR, s: sS
         });
 
-        bytes32 iDigest = _intentDigest(address(dummy), scope, address(0), address(0), wrongHash, 1 ether, exp, chainId, 0, 0, 0, bytes32(0));
+        bytes32 iDigest = _intentDigest(address(dummy), scope, address(0), address(0), wrongHash, 1 ether, exp, chainId, 0, 0, 0, 0, bytes32(0));
         (uint8 iV, bytes32 iR, bytes32 iS) = vm.sign(SESSION_KEY, iDigest);
 
         IdentityStore.IntentParams memory intent = IdentityStore.IntentParams({
             targetContract: address(dummy), functionSig: scope,
             recipient: address(0), assetAddress: address(0), callDataHash: wrongHash,
             maxValue: 1 ether, expiration: exp, chainId: chainId, nonce: 0,
-            gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
+            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
             v: iV, r: iR, s: iS
         });
 
@@ -1389,8 +1407,184 @@ contract HuntKeyAccountTest is Test {
 
         vm.prank(ENTRY_POINT);
         uint256 result = account.validateUserOp(userOp, keccak256("test"), 0.1 ether);
-        assertEq(result, 0);
+        assertEq(result, _packValidation(false, uint48(exp), 0));
 
         assertEq(ENTRY_POINT.balance, epBalanceBefore + 0.1 ether, "EntryPoint should be pre-funded");
+    }
+
+    // -----------------------------------------------------------------------
+    // 41. Session epoch enforcement — mismatch reverts in validateUserOp
+    // -----------------------------------------------------------------------
+    function testValidateUserOpSessionEpochMismatch() public {
+        // Increment session epoch for actionSigner
+        account.cancelAllSessions(actionSigner);
+        // sessionEpoch[actionSigner] is now 1, but intent has sessionEpoch=0
+
+        bytes4 scope = DummyTarget.doSomething.selector;
+        uint64 exp = uint64(block.timestamp + 1 hours);
+        bytes memory cd = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(42));
+
+        bytes memory sig = _buildUserOpSignature(scope, address(dummy), 1 ether, exp, 0.5 ether, exp, cd, 0, 0, bytes32(0));
+        PackedUserOperation memory userOp = _emptyUserOp(sig);
+        userOp.sender = address(account);
+
+        vm.prank(ENTRY_POINT);
+        uint256 result = account.validateUserOp(userOp, keccak256("test"), 0);
+        // Should fail with packed SIG_VALIDATION_FAILED
+        assertEq(result, _packValidation(true, 0, 0), "epoch mismatch should return sig failure");
+    }
+
+    // -----------------------------------------------------------------------
+    // 42. Recovery management allowed during RecoveryPending
+    // -----------------------------------------------------------------------
+    function testRecoveryManagementAllowedDuringRecovery() public {
+        // Set up recovery state
+        uint256 guardianKey = 0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a;
+        address guardian = vm.addr(guardianKey);
+        address newRoot = address(0xBBBB);
+
+        account.registerProver(actionSigner);
+        address[] memory guardians = new address[](3);
+        guardians[0] = guardian;
+        guardians[1] = vm.addr(0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba);
+        guardians[2] = vm.addr(0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e);
+        account.setGuardians(actionSigner, guardians);
+
+        // Initiate recovery
+        bytes32 recovDigest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                account.DOMAIN_SEPARATOR(),
+                keccak256(abi.encode(account.RECOVERY_TYPEHASH(), actionSigner, newRoot, uint64(block.chainid), uint64(0)))
+            )
+        );
+        (uint8 rv, bytes32 rr, bytes32 rs) = vm.sign(guardianKey, recovDigest);
+        account.initiateRecovery(actionSigner, newRoot, rv, rr, rs);
+
+        // Build a UserOp with cancelRecovery calldata — should be allowed
+        bytes4 scope = DummyTarget.doSomething.selector;
+        uint64 exp = uint64(block.timestamp + 1 hours);
+        bytes memory cd = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(42));
+
+        bytes memory sig = _buildUserOpSignature(scope, address(dummy), 1 ether, exp, 0.5 ether, exp, cd, 0, 0, bytes32(0));
+        PackedUserOperation memory userOp = _emptyUserOp(sig);
+        userOp.sender = address(account);
+        // Set callData to cancelRecovery(address) selector
+        userOp.callData = abi.encodeWithSelector(bytes4(keccak256("cancelRecovery(address)")), actionSigner);
+
+        vm.prank(ENTRY_POINT);
+        uint256 result = account.validateUserOp(userOp, keccak256("test"), 0);
+        // Recovery management should succeed (packed with validUntil)
+        assertEq(result, _packValidation(false, uint48(exp), 0), "recovery management should be allowed");
+    }
+
+    // -----------------------------------------------------------------------
+    // 43. Non-recovery callData blocked during RecoveryPending
+    // -----------------------------------------------------------------------
+    function testNonRecoveryBlockedDuringRecovery() public {
+        uint256 guardianKey = 0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a;
+        address guardian = vm.addr(guardianKey);
+        address newRoot = address(0xBBBB);
+
+        account.registerProver(actionSigner);
+        address[] memory guardians = new address[](3);
+        guardians[0] = guardian;
+        guardians[1] = vm.addr(0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba);
+        guardians[2] = vm.addr(0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e);
+        account.setGuardians(actionSigner, guardians);
+
+        bytes32 recovDigest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                account.DOMAIN_SEPARATOR(),
+                keccak256(abi.encode(account.RECOVERY_TYPEHASH(), actionSigner, newRoot, uint64(block.chainid), uint64(0)))
+            )
+        );
+        (uint8 rv, bytes32 rr, bytes32 rs) = vm.sign(guardianKey, recovDigest);
+        account.initiateRecovery(actionSigner, newRoot, rv, rr, rs);
+
+        // Build a UserOp with non-recovery callData (e.g., execute)
+        bytes4 scope = DummyTarget.doSomething.selector;
+        uint64 exp = uint64(block.timestamp + 1 hours);
+        bytes memory cd = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(42));
+
+        bytes memory sig = _buildUserOpSignature(scope, address(dummy), 1 ether, exp, 0.5 ether, exp, cd, 0, 0, bytes32(0));
+        PackedUserOperation memory userOp = _emptyUserOp(sig);
+        // callData targets a non-recovery function
+        userOp.callData = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(42));
+
+        vm.prank(ENTRY_POINT);
+        vm.expectRevert(HuntKeyAccount.RecoveryBlocksUserOp.selector);
+        account.validateUserOp(userOp, keccak256("test"), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // 44. validationData packing — verify packed format
+    // -----------------------------------------------------------------------
+    function testValidationDataPackedFormat() public {
+        bytes4 scope = DummyTarget.doSomething.selector;
+        uint64 exp = uint64(block.timestamp + 7200); // 2 hours
+        bytes memory cd = abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(42));
+
+        bytes memory sig = _buildUserOpSignature(scope, address(dummy), 1 ether, exp, 0.5 ether, exp, cd, 0, 0, bytes32(0));
+        PackedUserOperation memory userOp = _emptyUserOp(sig);
+        userOp.sender = address(account);
+
+        vm.prank(ENTRY_POINT);
+        uint256 result = account.validateUserOp(userOp, keccak256("test"), 0);
+
+        // Extract components from packed validationData
+        address authorizer = address(uint160(result));
+        uint48 validUntil = uint48(result >> 160);
+        uint48 validAfter = uint48(result >> 208);
+
+        assertEq(authorizer, address(0), "authorizer should be 0 for success");
+        assertEq(validUntil, uint48(exp), "validUntil should match session expiration");
+        assertEq(validAfter, 0, "validAfter should be 0");
+    }
+
+    // -----------------------------------------------------------------------
+    // 45. Session epoch enforcement in executeMulticall
+    // -----------------------------------------------------------------------
+    function testMulticallSessionEpochMismatch() public {
+        // Increment epoch
+        account.cancelAllSessions(actionSigner);
+
+        address sessionAddr = vm.addr(SESSION_KEY);
+        bytes4 scope = DummyTarget.doSomething.selector;
+        uint64 exp = uint64(block.timestamp + 1 hours);
+        uint64 chainId = uint64(block.chainid);
+
+        HuntKeyAccount.Call[] memory calls = new HuntKeyAccount.Call[](1);
+        calls[0] = HuntKeyAccount.Call({
+            target: address(dummy),
+            value: 0,
+            data: abi.encodeWithSelector(DummyTarget.doSomething.selector, address(0x1234), uint256(42))
+        });
+
+        bytes32 multicallHash = keccak256(abi.encode(calls));
+
+        bytes32 sessDigest = _sessionDigest(sessionAddr, actionSigner, scope, address(dummy), 1 ether, exp, chainId);
+        (uint8 sV, bytes32 sR, bytes32 sS) = vm.sign(ACTION_KEY, sessDigest);
+
+        ExecutionGateway.SessionParams memory sess = ExecutionGateway.SessionParams({
+            session: sessionAddr, parent: actionSigner, scope: scope, target: address(dummy),
+            maxValue: 1 ether, expiration: exp, chainId: chainId, v: sV, r: sR, s: sS
+        });
+
+        // Intent with sessionEpoch=0 but storage is 1
+        bytes32 iDigest = _intentDigest(address(dummy), scope, address(0), address(0), multicallHash, 1 ether, exp, chainId, 0, 0, 0, 0, bytes32(0));
+        (uint8 iV, bytes32 iR, bytes32 iS) = vm.sign(SESSION_KEY, iDigest);
+
+        IdentityStore.IntentParams memory intent = IdentityStore.IntentParams({
+            targetContract: address(dummy), functionSig: scope,
+            recipient: address(0), assetAddress: address(0), callDataHash: multicallHash,
+            maxValue: 1 ether, expiration: exp, chainId: chainId, nonce: 0,
+            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
+            v: iV, r: iR, s: iS
+        });
+
+        vm.expectRevert(IdentityStore.SessionEpochMismatch.selector);
+        account.executeMulticall(sess, intent, calls);
     }
 }

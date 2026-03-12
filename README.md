@@ -37,7 +37,10 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete technical specification.
 - **Credential/Claim System** — `requiredClaim` field in SovereignIntent gates operations on verifiable claims. `userClaims` mapping with `bytes32(0)` bypass for unrestricted operations.
 - **Identity Monitoring** — `IdentityWatcher` tracks on-chain events and generates security alerts at Info/Warning/Critical severity. Detects unknown guardian recovery, unauthorized delegation, and offline session issuance.
 - **Gas Parameter Binding** — `gasLimit` and `maxFeePerGas` fields in SovereignIntent v2.0, signed into the EIP-712 struct for ERC-4337 integration.
-- **Recovery-Gated UserOps** — `RecoveryPending` state hard-blocks all `validateUserOp` calls with `RecoveryBlocksUserOp` revert.
+- **Session Epoch Mass Invalidation** — `sessionEpoch` field in SovereignIntent v2.1 must match on-chain `sessionEpoch[root]`. Incrementing the epoch instantly invalidates all outstanding sessions and intents without per-key revocation.
+- **Recovery-Gated UserOps** — During `RecoveryPending`, `validateUserOp` blocks all operations except recovery management (`cancelRecovery`, `supportRecovery`, `finalizeRecovery`). Returns packed `validationData` (authorizer | validUntil | validAfter) per ERC-4337 spec.
+- **Guardian Notifications** — `IdentityWatcher` generates real-time `GuardianNotification` alerts for recovery events and high-value intent execution above configurable thresholds. Drain-based consumption pattern for async notification services.
+- **UserOperation Builder** — Rust builder pattern for constructing ERC-4337 v0.7+ `PackedUserOperation` with 3-layer signature chain packed into the `signature` field.
 
 ## Security Properties
 
@@ -52,7 +55,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete technical specification.
 
 ```
 src/
-├── lib.rs                 Crate root, re-exports, 41 integration tests
+├── lib.rs                 Crate root, re-exports, 48 integration tests
 ├── core/mod.rs            Key derivation, keccak256, ABI encoding
 ├── intents/mod.rs         SovereignIntent v2.0, DelegationCertificate, EIP-712
 ├── sessions/mod.rs        SessionKey (HKDF-SHA256), session certificates
@@ -65,7 +68,7 @@ contracts/
 ├── src/ExecutionGateway.sol   Session validation, scope enforcement, execution
 ├── src/IAccount.sol           ERC-4337 IAccount interface
 ├── src/HuntKeyAccount.sol     ERC-4337 account + claims + multicall
-└── test/PolicyGuard.t.sol     40 Solidity tests
+└── test/PolicyGuard.t.sol     45 Solidity tests
 
 sdk/ts/src/
 └── index.ts               TypeScript SDK (MnemonicManager, IntentSigner, SessionManager)
@@ -90,22 +93,22 @@ cargo run
 
 Outputs the full protocol flow: mnemonic generation, key hierarchy, delegation certificates, session keys, and 3-layer signing chain verification.
 
-### Run Rust Tests (41 tests)
+### Run Rust Tests (48 tests)
 
 ```bash
 cargo test
 ```
 
-Covers: key derivation, EIP-712 hash determinism, sign/recover roundtrips, delegation chain verification, recovery threshold/timelock, session key HKDF derivation, cross-chain isolation, identity monitoring alerts, and full end-to-end protocol flow. Includes property-based tests via proptest.
+Covers: key derivation, EIP-712 hash determinism, sign/recover roundtrips, delegation chain verification, recovery threshold/timelock, session key HKDF derivation, cross-chain isolation, identity monitoring alerts, guardian notifications, high-value intent detection, UserOperation builder packing, and full end-to-end protocol flow. Includes property-based tests via proptest.
 
-### Run Solidity Tests (40 tests)
+### Run Solidity Tests (45 tests)
 
 ```bash
 cd contracts
 forge test -vv
 ```
 
-Covers: direct intent validation, delegated verification, social recovery, execution gateway (happy path, one-time use, selector/target/calldata mismatch, session expiry, value caps, calldata mutation, recovery-blocked execution), ERC-4337 validateUserOp (3-layer chain, recovery blocking, EntryPoint gating, pre-funding), credential/claim checks, and multicall hash verification.
+Covers: direct intent validation, delegated verification, social recovery, execution gateway (happy path, one-time use, selector/target/calldata mismatch, session expiry, value caps, calldata mutation, recovery-blocked execution), ERC-4337 validateUserOp (3-layer chain, recovery management exception, packed validationData, EntryPoint gating, pre-funding), session epoch enforcement, credential/claim checks, and multicall hash verification.
 
 ### Build WASM SDK
 
@@ -123,6 +126,7 @@ cargo build --features wasm --target wasm32-unknown-unknown
 
 | Document | Contents |
 |----------|----------|
+| [docs/USER_FLOW.md](docs/USER_FLOW.md) | Identity -> Delegation -> Session -> Intent -> Execution flow |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 4-layer defense model, AA integration, state machine, key hierarchy |
 | [specs/protocol_overview.md](specs/protocol_overview.md) | EIP-712 type strings, domain separator, session epoch |
 | [specs/threat_model.md](specs/threat_model.md) | 10 attack vectors with mitigations |

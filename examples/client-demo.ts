@@ -56,6 +56,7 @@ async function demo() {
     expiration: Math.floor(Date.now() / 1000) + 3600, // 1 hour from now
     chainId: CHAIN_ID,
     nonce: 0,
+    sessionEpoch: 0,                 // must match on-chain sessionEpoch[root]
     gasLimit: 100000,                // ERC-4337 gas limit
     maxFeePerGas: "50000000000",     // 50 gwei
     requiredClaim: "00".repeat(32),  // no claim required
