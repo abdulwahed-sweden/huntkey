@@ -30,15 +30,22 @@ pub fn create_intent_wasm(
     expiration: u64,
     chain_id: u64,
     nonce: u64,
+    gas_limit: u64,
+    max_fee_per_gas: &str,
+    required_claim_hex: &str,
 ) -> Result<String, JsValue> {
     let target: [u8; 20] = hex_to_array(target_contract)?;
     let fn_sig: [u8; 4] = hex_to_array(function_sig)?;
     let recip: [u8; 20] = hex_to_array(recipient)?;
     let asset: [u8; 20] = hex_to_array(asset_address)?;
     let data_hash: [u8; 32] = hex_to_array(call_data_hash_hex)?;
+    let req_claim: [u8; 32] = hex_to_array(required_claim_hex)?;
     let max_val: u128 = max_value
         .parse()
         .map_err(|e| JsValue::from_str(&format!("invalid max_value: {}", e)))?;
+    let max_fee: u128 = max_fee_per_gas
+        .parse()
+        .map_err(|e| JsValue::from_str(&format!("invalid max_fee_per_gas: {}", e)))?;
 
     let intent = SovereignIntent {
         target_contract: target,
@@ -50,6 +57,9 @@ pub fn create_intent_wasm(
         expiration,
         chain_id,
         nonce,
+        gas_limit,
+        max_fee_per_gas: max_fee,
+        required_claim: req_claim,
     };
 
     serde_json::to_string(&serde_json::json!({
@@ -62,6 +72,9 @@ pub fn create_intent_wasm(
         "expiration": intent.expiration,
         "chain_id": intent.chain_id,
         "nonce": intent.nonce,
+        "gas_limit": intent.gas_limit,
+        "max_fee_per_gas": intent.max_fee_per_gas.to_string(),
+        "required_claim": hex::encode(intent.required_claim),
     }))
     .map_err(|e| JsValue::from_str(&format!("serialization failed: {}", e)))
 }

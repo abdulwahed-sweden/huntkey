@@ -9,6 +9,8 @@
 pub mod core;
 /// EIP-712 intent signing, delegation certificates, and verification.
 pub mod intents;
+/// Identity monitoring, event tracking, and security alerting.
+pub mod monitor;
 /// Social recovery: guardian threshold signing and pending recovery tracking.
 pub mod recovery;
 /// Ephemeral session keys: HKDF derivation and session certificate signing.
@@ -34,6 +36,8 @@ pub use recovery::{
     recover_recovery_signer, recovery_signing_hash, recovery_struct_hash, sign_recovery_request,
     PendingRecovery, RecoveryRequest,
 };
+
+pub use monitor::{AlertCategory, AlertSeverity, IdentityWatcher, SecurityAlert};
 
 pub use sessions::{
     derive_session_key, recover_session_signer, session_signing_hash, session_struct_hash,
@@ -233,6 +237,9 @@ mod sovereign_tests {
             expiration: 1700000000,
             chain_id: 1,
             nonce: 0,
+            gas_limit: 0,
+            max_fee_per_gas: 0,
+            required_claim: [0x00; 32],
         };
 
         let h1 = intent_signing_hash(&intent, &contract);
@@ -257,6 +264,9 @@ mod sovereign_tests {
             expiration: 1800000000,
             chain_id: 1,
             nonce: 42,
+            gas_limit: 0,
+            max_fee_per_gas: 0,
+            required_claim: [0x00; 32],
         };
 
         let privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
@@ -383,6 +393,9 @@ mod sovereign_tests {
             expiration: 1800000000,
             chain_id: 1,
             nonce: 0,
+            gas_limit: 0,
+            max_fee_per_gas: 0,
+            required_claim: [0x00; 32],
         };
 
         let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
@@ -559,6 +572,9 @@ mod sovereign_tests {
                 expiration: exp,
                 chain_id: 1,
                 nonce,
+                gas_limit: 0,
+                max_fee_per_gas: 0,
+                required_claim: [0x00; 32],
             };
 
             let privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
@@ -750,6 +766,9 @@ mod sovereign_tests {
             expiration: 1800000000,
             chain_id: 1,
             nonce: 0,
+            gas_limit: 0,
+            max_fee_per_gas: 0,
+            required_claim: [0x00; 32],
         };
         let intent_sig = sign_intent(&intent, &verifying_contract, &session.private_key);
 
@@ -891,6 +910,9 @@ mod sovereign_tests {
             expiration: 1800000000,
             chain_id: 1,
             nonce: 0,
+            gas_limit: 100_000,
+            max_fee_per_gas: 50_000_000_000, // 50 gwei
+            required_claim: [0x00; 32],
         };
         let intent_sig = sign_intent(&intent, &verifying_contract, &session.private_key);
         let recovered_session = recover_signer(&intent, &verifying_contract, &intent_sig);
@@ -924,5 +946,120 @@ mod sovereign_tests {
         let session_polygon = derive_session_key(&action_privkey, 0, 137);
         assert_ne!(session.eth_address, session_polygon.eth_address,
             "same nonce on different chain must produce different session key");
+    }
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    use super::*;
+
+    #[test]
+    fn test_watcher_recovery_known_guardian() {
+        let mut watcher = IdentityWatcher::new();
+        let identity = [0xAA; 20];
+        let guardian = [0xBB; 20];
+
+        watcher.register_guardians(identity, vec![guardian, [0xCC; 20], [0xDD; 20]]);
+
+        let alert = watcher.on_recovery_state_changed(
+            identity, "RecoveryPending", Some(guardian), 100, 1000,
+        );
+
+        assert_eq!(alert.severity, AlertSeverity::Warning);
+        assert_eq!(alert.category, AlertCategory::RecoveryInitiated);
+        assert!(alert.message.contains("known guardian"));
+    }
+
+    #[test]
+    fn test_watcher_recovery_unknown_guardian() {
+        let mut watcher = IdentityWatcher::new();
+        let identity = [0xAA; 20];
+        let unknown = [0xFF; 20];
+
+        watcher.register_guardians(identity, vec![[0xBB; 20], [0xCC; 20], [0xDD; 20]]);
+
+        let alert = watcher.on_recovery_state_changed(
+            identity, "RecoveryPending", Some(unknown), 100, 1000,
+        );
+
+        assert_eq!(alert.severity, AlertSeverity::Critical);
+        assert!(alert.message.contains("UNKNOWN guardian"));
+    }
+
+    #[test]
+    fn test_watcher_delegation_known_vs_unknown() {
+        let mut watcher = IdentityWatcher::new();
+        let identity = [0xAA; 20];
+        let known_delegate = [0xBB; 20];
+        let unknown_delegate = [0xFF; 20];
+
+        watcher.register_delegate(identity, known_delegate);
+
+        let alert_known = watcher.on_delegation_endorsed(
+            identity, known_delegate, [0xa9, 0x05, 0x9c, 0xbb], 100, 1000,
+        );
+        assert_eq!(alert_known.severity, AlertSeverity::Info);
+        assert_eq!(alert_known.category, AlertCategory::DelegationIssued);
+
+        let alert_unknown = watcher.on_delegation_endorsed(
+            identity, unknown_delegate, [0xa9, 0x05, 0x9c, 0xbb], 101, 1001,
+        );
+        assert_eq!(alert_unknown.severity, AlertSeverity::Warning);
+        assert_eq!(alert_unknown.category, AlertCategory::UnknownDelegation);
+    }
+
+    #[test]
+    fn test_watcher_session_invalidated() {
+        let mut watcher = IdentityWatcher::new();
+        let identity = [0xAA; 20];
+
+        let alert = watcher.on_session_invalidated(identity, 5, 200, 2000);
+        assert_eq!(alert.severity, AlertSeverity::Warning);
+        assert_eq!(alert.category, AlertCategory::SessionsInvalidated);
+        assert!(alert.message.contains("epoch: 5"));
+    }
+
+    #[test]
+    fn test_watcher_offline_session_detected() {
+        let mut watcher = IdentityWatcher::new();
+        let identity = [0xAA; 20];
+        let session = [0xEE; 20];
+
+        let alert = watcher.on_offline_session_detected(identity, session, 300, 3000);
+        assert_eq!(alert.severity, AlertSeverity::Critical);
+        assert_eq!(alert.category, AlertCategory::OfflineSessionDetected);
+    }
+
+    #[test]
+    fn test_watcher_alert_filtering() {
+        let mut watcher = IdentityWatcher::new();
+        let id1 = [0xAA; 20];
+        let id2 = [0xBB; 20];
+
+        watcher.on_intent_executed(id1, [0x11; 20], [0xa9, 0x05, 0x9c, 0xbb], 100, 1000);
+        watcher.on_session_invalidated(id2, 1, 101, 1001);
+        watcher.on_offline_session_detected(id1, [0x22; 20], 102, 1002);
+
+        assert_eq!(watcher.alerts().len(), 3);
+        assert_eq!(watcher.alerts_by_severity(AlertSeverity::Critical).len(), 1);
+        assert_eq!(watcher.alerts_by_severity(AlertSeverity::Info).len(), 1);
+        assert_eq!(watcher.alerts_for_identity(&id1).len(), 2);
+        assert_eq!(watcher.alerts_for_identity(&id2).len(), 1);
+
+        watcher.clear_alerts();
+        assert_eq!(watcher.alerts().len(), 0);
+    }
+
+    #[test]
+    fn test_watcher_identity_frozen() {
+        let mut watcher = IdentityWatcher::new();
+        let identity = [0xAA; 20];
+
+        let alert = watcher.on_recovery_state_changed(
+            identity, "Frozen", None, 100, 1000,
+        );
+        assert_eq!(alert.severity, AlertSeverity::Warning);
+        assert_eq!(alert.category, AlertCategory::IdentityFrozen);
+        assert!(alert.message.contains("FROZEN"));
     }
 }

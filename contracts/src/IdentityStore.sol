@@ -39,7 +39,7 @@ abstract contract IdentityStore {
     // --- EIP-712 constants ---
     bytes32 public constant INTENT_TYPEHASH =
         keccak256(
-            "SovereignIntent(address targetContract,bytes4 functionSig,address recipient,address assetAddress,bytes32 callDataHash,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce)"
+            "SovereignIntent(address targetContract,bytes4 functionSig,address recipient,address assetAddress,bytes32 callDataHash,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce,uint64 gasLimit,uint128 maxFeePerGas,bytes32 requiredClaim)"
         );
 
     bytes32 public constant DELEGATION_TYPEHASH =
@@ -85,6 +85,9 @@ abstract contract IdentityStore {
         uint64 expiration;
         uint64 chainId;
         uint64 nonce;
+        uint64 gasLimit;
+        uint128 maxFeePerGas;
+        bytes32 requiredClaim;
         uint8 v;
         bytes32 r;
         bytes32 s;
@@ -210,7 +213,8 @@ abstract contract IdentityStore {
             abi.encode(
                 INTENT_TYPEHASH, p.targetContract, p.functionSig,
                 p.recipient, p.assetAddress, p.callDataHash,
-                p.maxValue, p.expiration, p.chainId, p.nonce
+                p.maxValue, p.expiration, p.chainId, p.nonce,
+                p.gasLimit, p.maxFeePerGas, p.requiredClaim
             )
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
@@ -247,6 +251,7 @@ abstract contract IdentityStore {
         address targetContract, bytes4 functionSig,
         address recipient, address assetAddress, bytes32 dataHash,
         uint128 maxValue, uint64 expiration, uint64 intentChainId, uint64 nonce,
+        uint64 gasLimit, uint128 maxFeePerGas, bytes32 requiredClaim,
         uint8 v, bytes32 r, bytes32 s
     ) external payable {
         if (block.timestamp > expiration) revert IntentExpired();
@@ -257,7 +262,8 @@ abstract contract IdentityStore {
             abi.encode(
                 INTENT_TYPEHASH, targetContract, functionSig,
                 recipient, assetAddress, dataHash,
-                maxValue, expiration, intentChainId, nonce
+                maxValue, expiration, intentChainId, nonce,
+                gasLimit, maxFeePerGas, requiredClaim
             )
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));

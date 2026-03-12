@@ -6,9 +6,9 @@ use crate::core::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-/// EIP-712 type string for SovereignIntent.
+/// EIP-712 type string for SovereignIntent (v2.0 with gasLimit, maxFeePerGas, requiredClaim).
 pub(crate) const INTENT_TYPE_STR: &str =
-    "SovereignIntent(address targetContract,bytes4 functionSig,address recipient,address assetAddress,bytes32 callDataHash,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce)";
+    "SovereignIntent(address targetContract,bytes4 functionSig,address recipient,address assetAddress,bytes32 callDataHash,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce,uint64 gasLimit,uint128 maxFeePerGas,bytes32 requiredClaim)";
 
 /// An intent describing a constrained on-chain action.
 #[derive(Debug, Clone)]
@@ -31,6 +31,12 @@ pub struct SovereignIntent {
     pub chain_id: u64,
     /// Per-signer nonce for replay protection.
     pub nonce: u64,
+    /// Gas limit for ERC-4337 UserOperation validation.
+    pub gas_limit: u64,
+    /// Maximum fee per gas unit (wei) for ERC-4337 operations.
+    pub max_fee_per_gas: u128,
+    /// Required credential claim (bytes32). Zero means no claim required.
+    pub required_claim: [u8; 32],
 }
 
 /// ECDSA signature components.
@@ -48,7 +54,7 @@ pub struct IntentSignature {
 pub fn intent_struct_hash(intent: &SovereignIntent) -> [u8; 32] {
     let typehash = keccak256(INTENT_TYPE_STR.as_bytes());
 
-    let mut buf = Vec::with_capacity(10 * 32);
+    let mut buf = Vec::with_capacity(13 * 32);
     buf.extend_from_slice(&typehash);
     buf.extend_from_slice(&address_to_word(&intent.target_contract));
     buf.extend_from_slice(&right_pad_32(&intent.function_sig)); // bytes4 right-padded
@@ -59,6 +65,9 @@ pub fn intent_struct_hash(intent: &SovereignIntent) -> [u8; 32] {
     buf.extend_from_slice(&u64_to_word(intent.expiration));
     buf.extend_from_slice(&u64_to_word(intent.chain_id));
     buf.extend_from_slice(&u64_to_word(intent.nonce));
+    buf.extend_from_slice(&u64_to_word(intent.gas_limit));
+    buf.extend_from_slice(&u128_to_word(intent.max_fee_per_gas));
+    buf.extend_from_slice(&intent.required_claim); // bytes32 is already 32 bytes
     keccak256(&buf)
 }
 

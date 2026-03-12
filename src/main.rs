@@ -86,6 +86,9 @@ fn main() {
         expiration: 1800000000,
         chain_id: 1,
         nonce: 0,
+        gas_limit: 0,
+        max_fee_per_gas: 0,
+        required_claim: [0x00; 32],
     };
 
     println!("\n  --- Signing Intent (v2) ---");
@@ -299,6 +302,9 @@ fn main() {
         expiration: 1800000000,
         chain_id: 1,
         nonce: 0,
+        gas_limit: 0,
+        max_fee_per_gas: 0,
+        required_claim: [0x00; 32],
     };
 
     let session_intent_sig = sign_intent(&session_intent, &verifying_contract, &session.private_key);

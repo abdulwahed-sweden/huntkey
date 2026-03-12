@@ -20,6 +20,9 @@ export interface SovereignIntent {
   expiration: number;       // unix timestamp
   chainId: number;
   nonce: number;
+  gasLimit: number;         // gas limit for ERC-4337 UserOp
+  maxFeePerGas: string;     // decimal wei string
+  requiredClaim: string;    // hex, 32 bytes (zero = no claim required)
 }
 
 export interface Signature {
@@ -45,6 +48,7 @@ interface HuntKeyWasm {
     targetContract: string, functionSig: string, recipient: string,
     assetAddress: string, callDataHashHex: string, maxValue: string,
     expiration: number, chainId: number, nonce: number,
+    gasLimit: number, maxFeePerGas: string, requiredClaimHex: string,
   ): string;
 
   sign_session_cert_wasm(
@@ -157,6 +161,9 @@ export const IntentSigner = {
       params.expiration,
       params.chainId,
       params.nonce,
+      params.gasLimit,
+      params.maxFeePerGas,
+      stripHexPrefix(params.requiredClaim),
     );
   },
 };
