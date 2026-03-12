@@ -60,12 +60,14 @@ pub struct SignedSession {
 ///
 /// IKM: action_privkey (32 bytes)
 /// Salt: domain string "HuntKey-V1-Session-Key"
-/// Info: parent_pubkey (33 bytes compressed) || nonce (8 bytes big-endian)
+/// Info: parent_pubkey (33 bytes compressed) || nonce (8 bytes BE) || chain_id (8 bytes BE)
 ///
-/// This ensures global uniqueness: different action keys, different nonces,
-/// or different parent public keys all produce distinct session keys.
+/// Including `chain_id` in the info parameter ensures absolute context isolation:
+/// the same action key + nonce on different networks produces different session keys,
+/// preventing any cross-chain session key reuse.
+///
 /// All secret material is zeroized after use.
-pub fn derive_session_key(action_privkey: &[u8; 32], nonce: u64) -> SessionKey {
+pub fn derive_session_key(action_privkey: &[u8; 32], nonce: u64, chain_id: u64) -> SessionKey {
     use hkdf::Hkdf;
     use k256::ecdsa::SigningKey;
     use sha2::Sha256;
@@ -74,10 +76,11 @@ pub fn derive_session_key(action_privkey: &[u8; 32], nonce: u64) -> SessionKey {
     let parent_key = SigningKey::from_bytes(action_privkey.into()).expect("invalid action key");
     let parent_pubkey = parent_key.verifying_key().to_sec1_bytes();
 
-    // Build info: parent_pubkey || nonce
-    let mut info = Vec::with_capacity(parent_pubkey.len() + 8);
+    // Build info: parent_pubkey || nonce || chain_id
+    let mut info = Vec::with_capacity(parent_pubkey.len() + 16);
     info.extend_from_slice(&parent_pubkey);
     info.extend_from_slice(&nonce.to_be_bytes());
+    info.extend_from_slice(&chain_id.to_be_bytes());
 
     // HKDF extract + expand
     let salt = b"HuntKey-V1-Session-Key";

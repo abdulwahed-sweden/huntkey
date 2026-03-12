@@ -57,13 +57,14 @@ Derived deterministically from an action key, not from the BIP-32 tree:
 HKDF-SHA256(
     IKM:  action_private_key (32 bytes)
     Salt: "HuntKey-V1-Session-Key"
-    Info: parent_compressed_pubkey (33 bytes) || nonce (8 bytes BE)
+    Info: parent_compressed_pubkey (33 bytes) || nonce (8 bytes BE) || chain_id (8 bytes BE)
 ) → session_private_key (32 bytes)
 ```
 
 Properties:
-- Deterministic: same action key + nonce always produces the same session key.
-- Unique: different action keys or nonces produce different session keys.
+- Deterministic: same action key + nonce + chain_id always produces the same session key.
+- Unique: different action keys, nonces, or chain IDs produce different session keys.
+- Chain-isolated: the same action key + nonce on Ethereum mainnet vs Polygon produces completely different session keys, preventing cross-chain session reuse.
 - One-time use: burned on-chain after `execute()`.
 - Zeroized: `SessionKey` implements `Zeroize` and `ZeroizeOnDrop`.
 

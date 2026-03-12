@@ -628,7 +628,7 @@ mod sovereign_tests {
             let action_key = hierarchy.derive_role(KeyRole::Action, 0);
 
             let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
-            let session = derive_session_key(&action_privkey, nonce);
+            let session = derive_session_key(&action_privkey, nonce, 1);
 
             let verifying_contract = [0x11; 20];
             let cert = SessionCertificate {
@@ -659,8 +659,8 @@ mod sovereign_tests {
         let action_key = hierarchy.derive_role(KeyRole::Action, 0);
         let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
 
-        let s1 = derive_session_key(&action_privkey, 0);
-        let s2 = derive_session_key(&action_privkey, 0);
+        let s1 = derive_session_key(&action_privkey, 0, 1);
+        let s2 = derive_session_key(&action_privkey, 0, 1);
         assert_eq!(s1.eth_address, s2.eth_address);
         assert_eq!(s1.private_key, s2.private_key);
     }
@@ -672,9 +672,9 @@ mod sovereign_tests {
         let action_key = hierarchy.derive_role(KeyRole::Action, 0);
         let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
 
-        let s0 = derive_session_key(&action_privkey, 0);
-        let s1 = derive_session_key(&action_privkey, 1);
-        let s2 = derive_session_key(&action_privkey, 2);
+        let s0 = derive_session_key(&action_privkey, 0, 1);
+        let s1 = derive_session_key(&action_privkey, 1, 1);
+        let s2 = derive_session_key(&action_privkey, 2, 1);
 
         assert_ne!(s0.eth_address, s1.eth_address);
         assert_ne!(s1.eth_address, s2.eth_address);
@@ -688,7 +688,7 @@ mod sovereign_tests {
         let action_key = hierarchy.derive_role(KeyRole::Action, 0);
         let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
 
-        let session = derive_session_key(&action_privkey, 0);
+        let session = derive_session_key(&action_privkey, 0, 1);
 
         let verifying_contract = [0xCC; 20];
         let cert = SessionCertificate {
@@ -721,7 +721,7 @@ mod sovereign_tests {
         let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
 
         // Derive session key
-        let session = derive_session_key(&action_privkey, 42);
+        let session = derive_session_key(&action_privkey, 42, 1);
 
         let verifying_contract = [0xCC; 20];
         let fn_sig = [0xa9, 0x05, 0x9c, 0xbb];
@@ -786,5 +786,143 @@ mod sovereign_tests {
         let h1 = session_signing_hash(&cert, &contract);
         let h2 = session_signing_hash(&cert, &contract);
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_hkdf_chain_id_isolation() {
+        // Same action key + nonce on different chains must produce different session keys
+        let root = test_root();
+        let hierarchy = KeyHierarchy::new(root);
+        let action_key = hierarchy.derive_role(KeyRole::Action, 0);
+        let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
+
+        let s_mainnet = derive_session_key(&action_privkey, 0, 1);   // Ethereum mainnet
+        let s_polygon = derive_session_key(&action_privkey, 0, 137); // Polygon
+        let s_arb     = derive_session_key(&action_privkey, 0, 42161); // Arbitrum
+
+        assert_ne!(s_mainnet.eth_address, s_polygon.eth_address,
+            "same key+nonce on different chains must produce different session keys");
+        assert_ne!(s_mainnet.eth_address, s_arb.eth_address);
+        assert_ne!(s_polygon.eth_address, s_arb.eth_address);
+
+        // Same chain must still be deterministic
+        let s_mainnet2 = derive_session_key(&action_privkey, 0, 1);
+        assert_eq!(s_mainnet.eth_address, s_mainnet2.eth_address);
+    }
+
+    #[test]
+    fn test_end_to_end_protocol_flow() {
+        // Full protocol simulation: mnemonic → hierarchy → delegation → session → intent
+        // Verifies the complete 4-layer signing chain matches the protocol spec.
+        let mnemonic = Mnemonic::from_str(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        ).unwrap();
+        let root = root_from_mnemonic(&mnemonic);
+        let mut hierarchy = KeyHierarchy::new(root);
+
+        // Layer 1: Root Identity (cold, never on-chain)
+        let root_id = hierarchy.derive_role(KeyRole::RootIdentity, 0);
+        let root_privkey: [u8; 32] = root_id.private_key.as_slice().try_into().unwrap();
+
+        // Layer 1b: Recovery guardians
+        let g0 = hierarchy.derive_role(KeyRole::Recovery, 0);
+        let g1 = hierarchy.derive_role(KeyRole::Recovery, 1);
+        let g2 = hierarchy.derive_role(KeyRole::Recovery, 2);
+        // All guardians are distinct
+        assert_ne!(g0.eth_address, g1.eth_address);
+        assert_ne!(g1.eth_address, g2.eth_address);
+
+        // Layer 2: Action key (warm)
+        let action_key = hierarchy.next_action_key();
+        let action_privkey: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
+
+        let verifying_contract = [0xAA; 20];
+        let fn_sig = [0xa9, 0x05, 0x9c, 0xbb]; // transfer(address,uint256)
+
+        // Root signs delegation certificate for action key
+        let delegation = DelegationCertificate {
+            delegate: action_key.eth_address.unwrap(),
+            scope: fn_sig,
+            max_value: 5_000_000_000_000_000_000, // 5 ETH
+            expiration: 2000000000,
+            chain_id: 1,
+            nonce: 0,
+        };
+        let signed_deleg = sign_delegation(&delegation, &verifying_contract, &root_privkey);
+        let recovered_root = recover_delegator(
+            &signed_deleg.certificate, &verifying_contract,
+            signed_deleg.v, &signed_deleg.r, &signed_deleg.s,
+        );
+        assert_eq!(recovered_root, root_id.eth_address.unwrap(),
+            "delegation must recover to root identity");
+
+        // Layer 3: Ephemeral session key (HKDF-derived)
+        let session = derive_session_key(&action_privkey, 0, 1);
+        let target = [0xBB; 20];
+
+        // Action key signs session certificate
+        let session_cert = SessionCertificate {
+            session: session.eth_address,
+            parent: action_key.eth_address.unwrap(),
+            scope: fn_sig,
+            target,
+            max_value: 2_000_000_000_000_000_000, // 2 ETH
+            expiration: 1900000000,
+            chain_id: 1,
+        };
+        let signed_sess = sign_session_cert(&session_cert, &verifying_contract, &action_privkey);
+        let recovered_parent = recover_session_signer(
+            &signed_sess.certificate, &verifying_contract,
+            signed_sess.v, &signed_sess.r, &signed_sess.s,
+        );
+        assert_eq!(recovered_parent, action_key.eth_address.unwrap(),
+            "session cert must recover to action key");
+
+        // Layer 4: Session key signs intent
+        let call_data = [0xa9, 0x05, 0x9c, 0xbb, 0x00, 0x01, 0x02, 0x03];
+        let data_hash = call_data_hash(&call_data);
+        let intent = SovereignIntent {
+            target_contract: target,
+            function_sig: fn_sig,
+            recipient: [0xCC; 20],
+            asset_address: [0x00; 20],
+            call_data_hash: data_hash,
+            max_value: 1_000_000_000_000_000_000, // 1 ETH
+            expiration: 1800000000,
+            chain_id: 1,
+            nonce: 0,
+        };
+        let intent_sig = sign_intent(&intent, &verifying_contract, &session.private_key);
+        let recovered_session = recover_signer(&intent, &verifying_contract, &intent_sig);
+        assert_eq!(recovered_session, session.eth_address,
+            "intent must recover to session key");
+
+        // Verify the complete chain links
+        assert_eq!(signed_deleg.certificate.delegate, action_key.eth_address.unwrap(),
+            "delegation.delegate == action key");
+        assert_eq!(signed_sess.certificate.parent, action_key.eth_address.unwrap(),
+            "session.parent == action key");
+        assert_eq!(signed_sess.certificate.session, recovered_session,
+            "session cert.session == intent signer");
+
+        // Verify scope enforcement constraints
+        assert_eq!(intent.function_sig, session_cert.scope,
+            "intent selector must match session scope");
+        assert_eq!(intent.target_contract, session_cert.target,
+            "intent target must match session target");
+        assert!(intent.max_value <= session_cert.max_value,
+            "intent value must not exceed session cap");
+        assert!(session_cert.max_value <= delegation.max_value,
+            "session cap must not exceed delegation cap");
+
+        // Verify calldata hash binding
+        let recomputed_hash = call_data_hash(&call_data);
+        assert_eq!(intent.call_data_hash, recomputed_hash,
+            "calldata hash must match");
+
+        // Verify cross-chain isolation
+        let session_polygon = derive_session_key(&action_privkey, 0, 137);
+        assert_ne!(session.eth_address, session_polygon.eth_address,
+            "same nonce on different chain must produce different session key");
     }
 }

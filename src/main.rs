@@ -240,11 +240,11 @@ fn main() {
     println!("========================================");
 
     let action_privkey2: [u8; 32] = action_key.private_key.as_slice().try_into().unwrap();
-    let session = derive_session_key(&action_privkey2, 0);
-    println!("\n  Session Key #0 (derived from Action Key + nonce=0):");
+    let session = derive_session_key(&action_privkey2, 0, 1);
+    println!("\n  Session Key #0 (derived from Action Key + nonce=0 + chain=1):");
     println!("  Address : 0x{}", hex::encode(session.eth_address));
 
-    let session2 = derive_session_key(&action_privkey2, 1);
+    let session2 = derive_session_key(&action_privkey2, 1, 1);
     println!("\n  Session Key #1 (derived from Action Key + nonce=1):");
     println!("  Address : 0x{}", hex::encode(session2.eth_address));
 
