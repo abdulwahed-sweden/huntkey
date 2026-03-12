@@ -40,7 +40,7 @@ abstract contract IdentityStore {
     // --- EIP-712 constants ---
     bytes32 public constant INTENT_TYPEHASH =
         keccak256(
-            "SovereignIntent(address targetContract,bytes4 functionSig,address recipient,address assetAddress,bytes32 callDataHash,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce,uint64 sessionEpoch,uint64 gasLimit,uint128 maxFeePerGas,bytes32 requiredClaim)"
+            "SovereignIntent(address targetContract,bytes4 functionSig,address recipient,address assetAddress,bytes32 callDataHash,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce,uint64 sessionEpoch,uint64 gasLimit,uint128 maxFeePerGas,uint128 maxPriorityFeePerGas,bytes32 requiredClaim)"
         );
 
     bytes32 public constant DELEGATION_TYPEHASH =
@@ -89,6 +89,7 @@ abstract contract IdentityStore {
         uint64 sessionEpoch;
         uint64 gasLimit;
         uint128 maxFeePerGas;
+        uint128 maxPriorityFeePerGas;
         bytes32 requiredClaim;
         uint8 v;
         bytes32 r;
@@ -227,7 +228,8 @@ abstract contract IdentityStore {
         );
         bytes memory second = abi.encode(
             p.expiration, p.chainId, p.nonce,
-            p.sessionEpoch, p.gasLimit, p.maxFeePerGas, p.requiredClaim
+            p.sessionEpoch, p.gasLimit, p.maxFeePerGas,
+            p.maxPriorityFeePerGas, p.requiredClaim
         );
         return keccak256(bytes.concat(first, second));
     }

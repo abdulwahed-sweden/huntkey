@@ -33,6 +33,7 @@ pub fn create_intent_wasm(
     session_epoch: u64,
     gas_limit: u64,
     max_fee_per_gas: &str,
+    max_priority_fee_per_gas: &str,
     required_claim_hex: &str,
 ) -> Result<String, JsValue> {
     let target: [u8; 20] = hex_to_array(target_contract)?;
@@ -47,6 +48,9 @@ pub fn create_intent_wasm(
     let max_fee: u128 = max_fee_per_gas
         .parse()
         .map_err(|e| JsValue::from_str(&format!("invalid max_fee_per_gas: {}", e)))?;
+    let max_priority_fee: u128 = max_priority_fee_per_gas
+        .parse()
+        .map_err(|e| JsValue::from_str(&format!("invalid max_priority_fee_per_gas: {}", e)))?;
 
     let intent = SovereignIntent {
         target_contract: target,
@@ -61,6 +65,7 @@ pub fn create_intent_wasm(
         session_epoch,
         gas_limit,
         max_fee_per_gas: max_fee,
+        max_priority_fee_per_gas: max_priority_fee,
         required_claim: req_claim,
     };
 
@@ -77,6 +82,7 @@ pub fn create_intent_wasm(
         "session_epoch": intent.session_epoch,
         "gas_limit": intent.gas_limit,
         "max_fee_per_gas": intent.max_fee_per_gas.to_string(),
+        "max_priority_fee_per_gas": intent.max_priority_fee_per_gas.to_string(),
         "required_claim": hex::encode(intent.required_claim),
     }))
     .map_err(|e| JsValue::from_str(&format!("serialization failed: {}", e)))

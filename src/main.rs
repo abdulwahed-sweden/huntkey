@@ -89,6 +89,7 @@ fn main() {
         session_epoch: 0,
         gas_limit: 0,
         max_fee_per_gas: 0,
+        max_priority_fee_per_gas: 0,
         required_claim: [0x00; 32],
     };
 
@@ -306,6 +307,7 @@ fn main() {
         session_epoch: 0,
         gas_limit: 0,
         max_fee_per_gas: 0,
+        max_priority_fee_per_gas: 0,
         required_claim: [0x00; 32],
     };
 

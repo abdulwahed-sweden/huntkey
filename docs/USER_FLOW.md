@@ -72,20 +72,21 @@ Session keys are ephemeral -- designed for single-use execution, then discarded.
 The session key signs a `SovereignIntent` -- a fully constrained description of the on-chain action:
 
 ```
-SovereignIntent v2.1 {
-  targetContract: address
-  functionSig:    bytes4
-  recipient:      address
-  assetAddress:   address
-  callDataHash:   bytes32    -- keccak256(calldata)
-  maxValue:       uint128
-  expiration:     uint64
-  chainId:        uint64
-  nonce:          uint64
-  sessionEpoch:   uint64     -- must match on-chain sessionEpoch[root]
-  gasLimit:       uint64
-  maxFeePerGas:   uint128
-  requiredClaim:  bytes32    -- credential binding (zero = none)
+SovereignIntent v2.2 {
+  targetContract:      address
+  functionSig:         bytes4
+  recipient:           address
+  assetAddress:        address
+  callDataHash:        bytes32    -- keccak256(calldata)
+  maxValue:            uint128
+  expiration:          uint64
+  chainId:             uint64
+  nonce:               uint64
+  sessionEpoch:        uint64     -- must match on-chain sessionEpoch[root]
+  gasLimit:            uint64
+  maxFeePerGas:        uint128
+  maxPriorityFeePerGas: uint128   -- anti-siphoning: binds bundler tip
+  requiredClaim:       bytes32    -- credential binding (zero = none)
 }
 ```
 
@@ -93,6 +94,7 @@ Key properties:
 
 - **callDataHash** binds the exact calldata bytes. Any single-byte mutation causes on-chain revert.
 - **sessionEpoch** enables mass invalidation. Incrementing the root's epoch instantly voids all outstanding intents without per-key revocation.
+- **maxPriorityFeePerGas** binds the bundler tip, preventing gas siphoning attacks where a malicious bundler inflates the priority fee to extract value from the user's gas deposit.
 - **requiredClaim** gates execution on verifiable credentials stored in the `userClaims` mapping.
 
 The intent is signed using EIP-712 typed structured data (`\x19\x01 || domainSeparator || structHash`).

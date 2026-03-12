@@ -53,7 +53,7 @@ contract ExecutionGatewayTest is Test {
         uint64 intentChainId,
         uint64 nonce
     ) internal view returns (bytes32) {
-        return _digestFull(targetContract, functionSig, recipient, assetAddress, dataHash, maxValue, expiration, intentChainId, nonce, 0, 0, 0, bytes32(0));
+        return _digestFull(targetContract, functionSig, recipient, assetAddress, dataHash, maxValue, expiration, intentChainId, nonce, 0, 0, 0, 0, bytes32(0));
     }
 
     function _digestFull(
@@ -69,6 +69,7 @@ contract ExecutionGatewayTest is Test {
         uint64 intentSessionEpoch,
         uint64 gasLimit,
         uint128 maxFeePerGas,
+        uint128 maxPriorityFeePerGas,
         bytes32 requiredClaim
     ) internal view returns (bytes32) {
         bytes memory first = abi.encode(
@@ -77,7 +78,8 @@ contract ExecutionGatewayTest is Test {
         );
         bytes memory second = abi.encode(
             expiration, intentChainId, nonce,
-            intentSessionEpoch, gasLimit, maxFeePerGas, requiredClaim
+            intentSessionEpoch, gasLimit, maxFeePerGas,
+            maxPriorityFeePerGas, requiredClaim
         );
         bytes32 structHash = keccak256(bytes.concat(first, second));
         return keccak256(
@@ -168,8 +170,8 @@ contract ExecutionGatewayTest is Test {
             targetContract: target, functionSig: fnSig, recipient: recipient,
             assetAddress: asset, callDataHash: dataHash, maxValue: maxVal,
             expiration: exp, chainId: chainId, nonce: nonce,
-            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
-            v: v, r: r, s: s
+            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, maxPriorityFeePerGas: 0,
+            requiredClaim: bytes32(0), v: v, r: r, s: s
         });
     }
 
@@ -369,6 +371,7 @@ contract ExecutionGatewayTest is Test {
             sessionEpoch: 0,
             gasLimit: 0,
             maxFeePerGas: 0,
+            maxPriorityFeePerGas: 0,
             requiredClaim: bytes32(0),
             v: iV,
             r: iR,
@@ -429,7 +432,7 @@ contract ExecutionGatewayTest is Test {
             targetContract: address(0xCAFE), functionSig: scope,
             recipient: address(0), assetAddress: address(0), callDataHash: dataHash,
             maxValue: 0.5 ether, expiration: exp, chainId: chainId, nonce: 0,
-            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
+            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, maxPriorityFeePerGas: 0, requiredClaim: bytes32(0),
             v: iV, r: iR, s: iS
         });
 
@@ -705,6 +708,7 @@ contract ExecutionGatewayTest is Test {
             sessionEpoch: 0,
             gasLimit: 0,
             maxFeePerGas: 0,
+            maxPriorityFeePerGas: 0,
             requiredClaim: bytes32(0),
             v: iV,
             r: iR,
@@ -837,7 +841,7 @@ contract ExecutionGatewayTest is Test {
             targetContract: address(dummy), functionSig: scope,
             recipient: address(0), assetAddress: address(0), callDataHash: dataHash,
             maxValue: 0.5 ether, expiration: exp, chainId: chainId, nonce: 0,
-            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
+            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, maxPriorityFeePerGas: 0, requiredClaim: bytes32(0),
             v: iV, r: iR, s: iS
         });
 
@@ -921,7 +925,7 @@ contract ExecutionGatewayTest is Test {
             targetContract: address(dummy), functionSig: scope,
             recipient: address(0), assetAddress: address(0), callDataHash: dataHash,
             maxValue: 0.5 ether, expiration: exp, chainId: chainId, nonce: 0,
-            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
+            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, maxPriorityFeePerGas: 0, requiredClaim: bytes32(0),
             v: iV, r: iR, s: iS
         });
 
@@ -1030,6 +1034,7 @@ contract HuntKeyAccountTest is Test {
         uint64 intentSessionEpoch,
         uint64 gasLimit,
         uint128 maxFeePerGas,
+        uint128 maxPriorityFeePerGas,
         bytes32 requiredClaim
     ) internal view returns (bytes32) {
         bytes memory first = abi.encode(
@@ -1038,7 +1043,8 @@ contract HuntKeyAccountTest is Test {
         );
         bytes memory second = abi.encode(
             expiration, intentChainId, nonce,
-            intentSessionEpoch, gasLimit, maxFeePerGas, requiredClaim
+            intentSessionEpoch, gasLimit, maxFeePerGas,
+            maxPriorityFeePerGas, requiredClaim
         );
         bytes32 structHash = keccak256(bytes.concat(first, second));
         return keccak256(
@@ -1106,7 +1112,7 @@ contract HuntKeyAccountTest is Test {
 
         // Intent signed by session key
         bytes32 dataHash = keccak256(callData);
-        bytes32 iDigest = _intentDigest(target, scope, address(0), address(0), dataHash, intentVal, intentExp, chainId, 0, 0, gasLimit, maxFeePerGas, requiredClaim);
+        bytes32 iDigest = _intentDigest(target, scope, address(0), address(0), dataHash, intentVal, intentExp, chainId, 0, 0, gasLimit, maxFeePerGas, 0, requiredClaim);
         (uint8 iV, bytes32 iR, bytes32 iS) = vm.sign(SESSION_KEY, iDigest);
 
         IdentityStore.IntentParams memory intent = IdentityStore.IntentParams({
@@ -1122,6 +1128,7 @@ contract HuntKeyAccountTest is Test {
             sessionEpoch: 0,
             gasLimit: gasLimit,
             maxFeePerGas: maxFeePerGas,
+            maxPriorityFeePerGas: 0,
             requiredClaim: requiredClaim,
             v: iV,
             r: iR,
@@ -1319,7 +1326,7 @@ contract HuntKeyAccountTest is Test {
         });
 
         // Build intent with multicall hash
-        bytes32 iDigest = _intentDigest(address(dummy), scope, address(0), address(0), multicallHash, 1 ether, exp, chainId, 0, 0, 0, 0, bytes32(0));
+        bytes32 iDigest = _intentDigest(address(dummy), scope, address(0), address(0), multicallHash, 1 ether, exp, chainId, 0, 0, 0, 0, 0, bytes32(0));
         (uint8 iV, bytes32 iR, bytes32 iS) = vm.sign(SESSION_KEY, iDigest);
 
         IdentityStore.IntentParams memory intent = IdentityStore.IntentParams({
@@ -1335,6 +1342,7 @@ contract HuntKeyAccountTest is Test {
             sessionEpoch: 0,
             gasLimit: 0,
             maxFeePerGas: 0,
+            maxPriorityFeePerGas: 0,
             requiredClaim: bytes32(0),
             v: iV,
             r: iR,
@@ -1376,14 +1384,14 @@ contract HuntKeyAccountTest is Test {
             maxValue: 1 ether, expiration: exp, chainId: chainId, v: sV, r: sR, s: sS
         });
 
-        bytes32 iDigest = _intentDigest(address(dummy), scope, address(0), address(0), wrongHash, 1 ether, exp, chainId, 0, 0, 0, 0, bytes32(0));
+        bytes32 iDigest = _intentDigest(address(dummy), scope, address(0), address(0), wrongHash, 1 ether, exp, chainId, 0, 0, 0, 0, 0, bytes32(0));
         (uint8 iV, bytes32 iR, bytes32 iS) = vm.sign(SESSION_KEY, iDigest);
 
         IdentityStore.IntentParams memory intent = IdentityStore.IntentParams({
             targetContract: address(dummy), functionSig: scope,
             recipient: address(0), assetAddress: address(0), callDataHash: wrongHash,
             maxValue: 1 ether, expiration: exp, chainId: chainId, nonce: 0,
-            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
+            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, maxPriorityFeePerGas: 0, requiredClaim: bytes32(0),
             v: iV, r: iR, s: iS
         });
 
@@ -1573,18 +1581,88 @@ contract HuntKeyAccountTest is Test {
         });
 
         // Intent with sessionEpoch=0 but storage is 1
-        bytes32 iDigest = _intentDigest(address(dummy), scope, address(0), address(0), multicallHash, 1 ether, exp, chainId, 0, 0, 0, 0, bytes32(0));
+        bytes32 iDigest = _intentDigest(address(dummy), scope, address(0), address(0), multicallHash, 1 ether, exp, chainId, 0, 0, 0, 0, 0, bytes32(0));
         (uint8 iV, bytes32 iR, bytes32 iS) = vm.sign(SESSION_KEY, iDigest);
 
         IdentityStore.IntentParams memory intent = IdentityStore.IntentParams({
             targetContract: address(dummy), functionSig: scope,
             recipient: address(0), assetAddress: address(0), callDataHash: multicallHash,
             maxValue: 1 ether, expiration: exp, chainId: chainId, nonce: 0,
-            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, requiredClaim: bytes32(0),
+            sessionEpoch: 0, gasLimit: 0, maxFeePerGas: 0, maxPriorityFeePerGas: 0, requiredClaim: bytes32(0),
             v: iV, r: iR, s: iS
         });
 
         vm.expectRevert(IdentityStore.SessionEpochMismatch.selector);
         account.executeMulticall(sess, intent, calls);
     }
+
+    // -----------------------------------------------------------------------
+    // 46. Deposit management — addDeposit and withdrawDepositTo
+    // -----------------------------------------------------------------------
+
+    function testDepositManagement() public {
+        // Deploy a mock EntryPoint that tracks deposits
+        MockEntryPoint ep = new MockEntryPoint();
+        account.setEntryPoint(address(ep));
+
+        // addDeposit
+        account.addDeposit{value: 1 ether}();
+        assertEq(ep.deposits(address(account)), 1 ether);
+
+        // getDeposit
+        uint256 bal = account.getDeposit();
+        assertEq(bal, 1 ether);
+
+        // withdrawDepositTo
+        address payable recipient = payable(address(0xF00D));
+        account.withdrawDepositTo(recipient, 0.5 ether);
+        assertEq(ep.deposits(address(account)), 0.5 ether);
+        assertEq(recipient.balance, 0.5 ether);
+    }
+
+    // -----------------------------------------------------------------------
+    // 47. withdrawDepositTo reverts for non-owner
+    // -----------------------------------------------------------------------
+
+    function testWithdrawDepositOnlyOwner() public {
+        MockEntryPoint ep = new MockEntryPoint();
+        account.setEntryPoint(address(ep));
+        account.addDeposit{value: 1 ether}();
+
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(IdentityStore.NotOwner.selector);
+        account.withdrawDepositTo(payable(address(0xBEEF)), 0.5 ether);
+    }
+
+    // -----------------------------------------------------------------------
+    // 48. getDeposit returns 0 when no EntryPoint set
+    // -----------------------------------------------------------------------
+
+    function testGetDepositNoEntryPoint() public {
+        HuntKeyAccount fresh = new HuntKeyAccount();
+        assertEq(fresh.getDeposit(), 0);
+    }
+}
+
+/// @dev Mock EntryPoint for deposit management testing
+contract MockEntryPoint {
+    mapping(address => uint256) public deposits;
+
+    function depositTo(address account) external payable {
+        deposits[account] += msg.value;
+    }
+
+    function withdrawTo(address payable withdrawAddress, uint256 amount) external {
+        // Find the sender's account (the HuntKeyAccount that called us)
+        // In practice, the EntryPoint tracks msg.sender
+        deposits[msg.sender] -= amount;
+        (bool success,) = withdrawAddress.call{value: amount}("");
+        require(success);
+    }
+
+    function balanceOf(address account) external view returns (uint256) {
+        return deposits[account];
+    }
+
+    receive() external payable {}
 }

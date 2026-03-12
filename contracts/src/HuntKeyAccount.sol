@@ -280,7 +280,8 @@ contract HuntKeyAccount is ExecutionGateway, IAccount {
         );
         bytes memory second = abi.encode(
             p.expiration, p.chainId, p.nonce,
-            p.sessionEpoch, p.gasLimit, p.maxFeePerGas, p.requiredClaim
+            p.sessionEpoch, p.gasLimit, p.maxFeePerGas,
+            p.maxPriorityFeePerGas, p.requiredClaim
         );
         bytes32 structHash = keccak256(bytes.concat(first, second));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
@@ -288,6 +289,47 @@ contract HuntKeyAccount is ExecutionGateway, IAccount {
         if (signer == address(0)) revert EcrecoverFailed();
         return signer;
     }
+
+    // --- ERC-4337 Deposit Management ---
+
+    /// @notice Deposit ETH into the EntryPoint on behalf of this account.
+    ///         Allows paymasters or anyone to fund the account's gas deposit.
+    function addDeposit() external payable {
+        if (entryPoint == address(0)) revert OnlyEntryPoint();
+        (bool success,) = payable(entryPoint).call{value: msg.value}(
+            abi.encodeWithSignature("depositTo(address)", address(this))
+        );
+        require(success, "deposit failed");
+        emit DepositAdded(msg.sender, msg.value);
+    }
+
+    /// @notice Withdraw from the account's EntryPoint deposit.
+    ///         Only callable by the owner.
+    /// @param withdrawAddress The address to receive the withdrawn funds.
+    /// @param amount The amount to withdraw in wei.
+    function withdrawDepositTo(address payable withdrawAddress, uint256 amount) external onlyOwner {
+        if (entryPoint == address(0)) revert OnlyEntryPoint();
+        (bool success,) = entryPoint.call(
+            abi.encodeWithSignature("withdrawTo(address,uint256)", withdrawAddress, amount)
+        );
+        require(success, "withdraw failed");
+        emit DepositWithdrawn(withdrawAddress, amount);
+    }
+
+    /// @notice Query the account's current deposit balance on the EntryPoint.
+    /// @return The deposit balance in wei.
+    function getDeposit() external view returns (uint256) {
+        if (entryPoint == address(0)) return 0;
+        (bool success, bytes memory data) = entryPoint.staticcall(
+            abi.encodeWithSignature("balanceOf(address)", address(this))
+        );
+        if (!success || data.length < 32) return 0;
+        return abi.decode(data, (uint256));
+    }
+
+    // --- Events ---
+    event DepositAdded(address indexed sender, uint256 amount);
+    event DepositWithdrawn(address indexed to, uint256 amount);
 
     /// @notice Allow the account to receive ETH (required for ERC-4337 pre-funding).
     receive() external payable {}

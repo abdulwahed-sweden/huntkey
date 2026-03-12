@@ -99,6 +99,8 @@ pub struct IdentityWatcher {
     pending_notifications: Vec<GuardianNotification>,
     /// Watcher configuration.
     config: WatcherConfig,
+    /// Structured event log (black box) for all protocol activity.
+    event_log: EventLog,
 }
 
 impl IdentityWatcher {
@@ -112,6 +114,7 @@ impl IdentityWatcher {
             config: WatcherConfig {
                 high_value_threshold: 0,
             },
+            event_log: EventLog::new(),
         }
     }
 
@@ -123,6 +126,7 @@ impl IdentityWatcher {
             alerts: Vec::new(),
             pending_notifications: Vec::new(),
             config,
+            event_log: EventLog::new(),
         }
     }
 
@@ -204,6 +208,7 @@ impl IdentityWatcher {
         };
 
         self.alerts.push(alert.clone());
+        self.event_log.record_recovery_state_changed(identity, new_state, guardian, block_number, timestamp);
 
         // Notify guardians for any recovery or freeze event
         if matches!(alert.severity, AlertSeverity::Warning | AlertSeverity::Critical) {
@@ -273,6 +278,7 @@ impl IdentityWatcher {
         };
 
         self.alerts.push(alert.clone());
+        self.event_log.record_session_invalidated(identity, new_epoch, block_number, timestamp);
         alert
     }
 
@@ -300,6 +306,7 @@ impl IdentityWatcher {
         };
 
         self.alerts.push(alert.clone());
+        self.event_log.record_intent_executed(identity, session_key, selector, block_number, timestamp);
         alert
     }
 
@@ -364,6 +371,7 @@ impl IdentityWatcher {
         };
 
         self.alerts.push(alert.clone());
+        self.event_log.record_high_value_intent(identity, session_key, value, selector, block_number, timestamp);
         self.notify_guardians(&identity, &alert);
         Some(alert)
     }
@@ -414,6 +422,16 @@ impl IdentityWatcher {
         self.alerts.clear();
     }
 
+    /// Access the structured event log (black box).
+    pub fn event_log(&self) -> &EventLog {
+        &self.event_log
+    }
+
+    /// Get a mutable reference to the event log.
+    pub fn event_log_mut(&mut self) -> &mut EventLog {
+        &mut self.event_log
+    }
+
     fn is_known_guardian(&self, identity: &[u8; 20], guardian: &[u8; 20]) -> bool {
         self.known_guardians
             .iter()
@@ -428,6 +446,214 @@ impl IdentityWatcher {
 }
 
 impl Default for IdentityWatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Event Log — Structured Black Box for Identity History
+// ---------------------------------------------------------------------------
+
+/// A single structured event entry in the identity event log.
+#[derive(Debug, Clone)]
+pub struct EventLogEntry {
+    /// Event type identifier.
+    pub event_type: EventType,
+    /// The identity (root address) this event relates to.
+    pub identity: [u8; 20],
+    /// Block number where the event occurred.
+    pub block_number: u64,
+    /// Unix timestamp of the event.
+    pub timestamp: u64,
+    /// Event-specific metadata as key-value pairs.
+    pub metadata: Vec<(String, String)>,
+}
+
+/// Types of events recorded in the event log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventType {
+    /// An intent was executed on-chain.
+    IntentExecuted,
+    /// All sessions were invalidated (epoch incremented).
+    SessionInvalidated,
+    /// Recovery state changed.
+    RecoveryStateChanged,
+    /// Delegation endorsed.
+    DelegationEndorsed,
+    /// High-value intent detected.
+    HighValueIntent,
+}
+
+/// Structured event log for recording all protocol activity.
+///
+/// Serves as the "black box" — a complete, append-only history of every
+/// identity event observed by the watcher. Can be exported to JSON for
+/// dashboard consumption or forensic analysis.
+pub struct EventLog {
+    entries: Vec<EventLogEntry>,
+}
+
+impl EventLog {
+    /// Create a new empty event log.
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Append an event to the log.
+    pub fn record(&mut self, entry: EventLogEntry) {
+        self.entries.push(entry);
+    }
+
+    /// Record an IntentExecuted event.
+    pub fn record_intent_executed(
+        &mut self,
+        identity: [u8; 20],
+        session_key: [u8; 20],
+        selector: [u8; 4],
+        block_number: u64,
+        timestamp: u64,
+    ) {
+        self.record(EventLogEntry {
+            event_type: EventType::IntentExecuted,
+            identity,
+            block_number,
+            timestamp,
+            metadata: vec![
+                ("session_key".into(), format!("0x{}", hex::encode(session_key))),
+                ("selector".into(), format!("0x{}", hex::encode(selector))),
+            ],
+        });
+    }
+
+    /// Record a SessionInvalidated event.
+    pub fn record_session_invalidated(
+        &mut self,
+        identity: [u8; 20],
+        new_epoch: u64,
+        block_number: u64,
+        timestamp: u64,
+    ) {
+        self.record(EventLogEntry {
+            event_type: EventType::SessionInvalidated,
+            identity,
+            block_number,
+            timestamp,
+            metadata: vec![
+                ("new_epoch".into(), new_epoch.to_string()),
+            ],
+        });
+    }
+
+    /// Record a RecoveryStateChanged event.
+    pub fn record_recovery_state_changed(
+        &mut self,
+        identity: [u8; 20],
+        new_state: &str,
+        guardian: Option<[u8; 20]>,
+        block_number: u64,
+        timestamp: u64,
+    ) {
+        let mut meta = vec![
+            ("new_state".into(), new_state.to_string()),
+        ];
+        if let Some(g) = guardian {
+            meta.push(("guardian".into(), format!("0x{}", hex::encode(g))));
+        }
+        self.record(EventLogEntry {
+            event_type: EventType::RecoveryStateChanged,
+            identity,
+            block_number,
+            timestamp,
+            metadata: meta,
+        });
+    }
+
+    /// Record a HighValueIntent event.
+    pub fn record_high_value_intent(
+        &mut self,
+        identity: [u8; 20],
+        session_key: [u8; 20],
+        value: u128,
+        selector: [u8; 4],
+        block_number: u64,
+        timestamp: u64,
+    ) {
+        self.record(EventLogEntry {
+            event_type: EventType::HighValueIntent,
+            identity,
+            block_number,
+            timestamp,
+            metadata: vec![
+                ("session_key".into(), format!("0x{}", hex::encode(session_key))),
+                ("selector".into(), format!("0x{}", hex::encode(selector))),
+                ("value_wei".into(), value.to_string()),
+            ],
+        });
+    }
+
+    /// Get all entries in the log.
+    pub fn entries(&self) -> &[EventLogEntry] {
+        &self.entries
+    }
+
+    /// Get entries filtered by event type.
+    pub fn entries_by_type(&self, event_type: EventType) -> Vec<&EventLogEntry> {
+        self.entries.iter().filter(|e| e.event_type == event_type).collect()
+    }
+
+    /// Get entries for a specific identity.
+    pub fn entries_for_identity(&self, identity: &[u8; 20]) -> Vec<&EventLogEntry> {
+        self.entries.iter().filter(|e| &e.identity == identity).collect()
+    }
+
+    /// Export the entire log as a JSON string.
+    ///
+    /// Each entry is serialized with its event type, identity, block number,
+    /// timestamp, and metadata key-value pairs.
+    pub fn export_json(&self) -> String {
+        let mut json = String::from("[\n");
+        for (i, entry) in self.entries.iter().enumerate() {
+            if i > 0 {
+                json.push_str(",\n");
+            }
+            json.push_str("  {\n");
+            json.push_str(&format!("    \"event_type\": \"{:?}\",\n", entry.event_type));
+            json.push_str(&format!("    \"identity\": \"0x{}\",\n", hex::encode(entry.identity)));
+            json.push_str(&format!("    \"block_number\": {},\n", entry.block_number));
+            json.push_str(&format!("    \"timestamp\": {},\n", entry.timestamp));
+            json.push_str("    \"metadata\": {");
+            for (j, (key, val)) in entry.metadata.iter().enumerate() {
+                if j > 0 {
+                    json.push(',');
+                }
+                json.push_str(&format!("\n      \"{}\": \"{}\"", key, val));
+            }
+            json.push_str("\n    }\n  }");
+        }
+        json.push_str("\n]");
+        json
+    }
+
+    /// Get the total number of recorded events.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Check if the log is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Clear all entries.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+impl Default for EventLog {
     fn default() -> Self {
         Self::new()
     }

@@ -38,8 +38,8 @@ pub use recovery::{
 };
 
 pub use monitor::{
-    AlertCategory, AlertSeverity, GuardianNotification, IdentityWatcher, SecurityAlert,
-    WatcherConfig,
+    AlertCategory, AlertSeverity, EventLog, EventLogEntry, EventType, GuardianNotification,
+    IdentityWatcher, SecurityAlert, WatcherConfig,
 };
 
 pub use sessions::{
@@ -243,6 +243,7 @@ mod sovereign_tests {
             session_epoch: 0,
             gas_limit: 0,
             max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
             required_claim: [0x00; 32],
         };
 
@@ -271,6 +272,7 @@ mod sovereign_tests {
             session_epoch: 0,
             gas_limit: 0,
             max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
             required_claim: [0x00; 32],
         };
 
@@ -401,6 +403,7 @@ mod sovereign_tests {
             session_epoch: 0,
             gas_limit: 0,
             max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
             required_claim: [0x00; 32],
         };
 
@@ -581,6 +584,7 @@ mod sovereign_tests {
                 session_epoch: 0,
                 gas_limit: 0,
                 max_fee_per_gas: 0,
+                max_priority_fee_per_gas: 0,
                 required_claim: [0x00; 32],
             };
 
@@ -776,6 +780,7 @@ mod sovereign_tests {
             session_epoch: 0,
             gas_limit: 0,
             max_fee_per_gas: 0,
+            max_priority_fee_per_gas: 0,
             required_claim: [0x00; 32],
         };
         let intent_sig = sign_intent(&intent, &verifying_contract, &session.private_key);
@@ -921,6 +926,7 @@ mod sovereign_tests {
             session_epoch: 0,
             gas_limit: 100_000,
             max_fee_per_gas: 50_000_000_000, // 50 gwei
+            max_priority_fee_per_gas: 2_000_000_000, // 2 gwei tip
             required_claim: [0x00; 32],
         };
         let intent_sig = sign_intent(&intent, &verifying_contract, &session.private_key);
@@ -1208,5 +1214,83 @@ mod userop_tests {
             .build(vec![]);
 
         assert_eq!(user_op.init_code, init);
+    }
+}
+
+#[cfg(test)]
+mod event_log_tests {
+    use super::*;
+
+    #[test]
+    fn test_event_log_records_and_queries() {
+        let mut watcher = IdentityWatcher::new();
+        let id = [0xAA; 20];
+        let session = [0xBB; 20];
+        let selector = [0xa9, 0x05, 0x9c, 0xbb];
+
+        // Fire events that auto-record to the event log
+        watcher.on_intent_executed(id, session, selector, 100, 1000);
+        watcher.on_session_invalidated(id, 1, 101, 1001);
+        watcher.on_recovery_state_changed(id, "RecoveryPending", Some([0xCC; 20]), 102, 1002);
+
+        let log = watcher.event_log();
+        assert_eq!(log.len(), 3);
+
+        let intent_events = log.entries_by_type(EventType::IntentExecuted);
+        assert_eq!(intent_events.len(), 1);
+        assert_eq!(intent_events[0].block_number, 100);
+
+        let session_events = log.entries_by_type(EventType::SessionInvalidated);
+        assert_eq!(session_events.len(), 1);
+        assert_eq!(session_events[0].metadata[0].1, "1");
+
+        let recovery_events = log.entries_by_type(EventType::RecoveryStateChanged);
+        assert_eq!(recovery_events.len(), 1);
+    }
+
+    #[test]
+    fn test_event_log_export_json() {
+        let mut log = EventLog::new();
+        log.record_intent_executed([0xAA; 20], [0xBB; 20], [0xa9, 0x05, 0x9c, 0xbb], 100, 1000);
+
+        let json = log.export_json();
+        assert!(json.contains("\"event_type\": \"IntentExecuted\""));
+        assert!(json.contains("\"block_number\": 100"));
+        assert!(json.contains("\"session_key\""));
+        assert!(json.contains("\"selector\""));
+    }
+
+    #[test]
+    fn test_event_log_high_value_recorded() {
+        let mut watcher = IdentityWatcher::with_config(WatcherConfig {
+            high_value_threshold: 1_000_000,
+        });
+        watcher.register_guardians([0xAA; 20], vec![[0xDD; 20]]);
+
+        let id = [0xAA; 20];
+        let session = [0xBB; 20];
+        let selector = [0xa9, 0x05, 0x9c, 0xbb];
+
+        // Below threshold — no high-value log entry
+        watcher.on_high_value_intent(id, session, 500_000, selector, 100, 1000);
+        assert_eq!(watcher.event_log().entries_by_type(EventType::HighValueIntent).len(), 0);
+
+        // Above threshold — recorded
+        watcher.on_high_value_intent(id, session, 2_000_000, selector, 101, 1001);
+        assert_eq!(watcher.event_log().entries_by_type(EventType::HighValueIntent).len(), 1);
+    }
+
+    #[test]
+    fn test_event_log_identity_filter() {
+        let mut log = EventLog::new();
+        let id1 = [0xAA; 20];
+        let id2 = [0xBB; 20];
+
+        log.record_intent_executed(id1, [0x01; 20], [0x01; 4], 100, 1000);
+        log.record_intent_executed(id2, [0x02; 20], [0x02; 4], 101, 1001);
+        log.record_session_invalidated(id1, 1, 102, 1002);
+
+        assert_eq!(log.entries_for_identity(&id1).len(), 2);
+        assert_eq!(log.entries_for_identity(&id2).len(), 1);
     }
 }

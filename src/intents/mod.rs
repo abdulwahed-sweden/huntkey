@@ -6,9 +6,9 @@ use crate::core::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-/// EIP-712 type string for SovereignIntent (v2.1 with sessionEpoch, gasLimit, maxFeePerGas, requiredClaim).
+/// EIP-712 type string for SovereignIntent (v2.2 with maxPriorityFeePerGas anti-siphoning).
 pub(crate) const INTENT_TYPE_STR: &str =
-    "SovereignIntent(address targetContract,bytes4 functionSig,address recipient,address assetAddress,bytes32 callDataHash,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce,uint64 sessionEpoch,uint64 gasLimit,uint128 maxFeePerGas,bytes32 requiredClaim)";
+    "SovereignIntent(address targetContract,bytes4 functionSig,address recipient,address assetAddress,bytes32 callDataHash,uint128 maxValue,uint64 expiration,uint64 chainId,uint64 nonce,uint64 sessionEpoch,uint64 gasLimit,uint128 maxFeePerGas,uint128 maxPriorityFeePerGas,bytes32 requiredClaim)";
 
 /// An intent describing a constrained on-chain action.
 #[derive(Debug, Clone)]
@@ -37,6 +37,8 @@ pub struct SovereignIntent {
     pub gas_limit: u64,
     /// Maximum fee per gas unit (wei) for ERC-4337 operations.
     pub max_fee_per_gas: u128,
+    /// Maximum priority fee per gas unit (wei). Binds the tip to prevent gas siphoning by malicious bundlers.
+    pub max_priority_fee_per_gas: u128,
     /// Required credential claim (bytes32). Zero means no claim required.
     pub required_claim: [u8; 32],
 }
@@ -56,7 +58,7 @@ pub struct IntentSignature {
 pub fn intent_struct_hash(intent: &SovereignIntent) -> [u8; 32] {
     let typehash = keccak256(INTENT_TYPE_STR.as_bytes());
 
-    let mut buf = Vec::with_capacity(14 * 32);
+    let mut buf = Vec::with_capacity(15 * 32);
     buf.extend_from_slice(&typehash);
     buf.extend_from_slice(&address_to_word(&intent.target_contract));
     buf.extend_from_slice(&right_pad_32(&intent.function_sig)); // bytes4 right-padded
@@ -70,6 +72,7 @@ pub fn intent_struct_hash(intent: &SovereignIntent) -> [u8; 32] {
     buf.extend_from_slice(&u64_to_word(intent.session_epoch));
     buf.extend_from_slice(&u64_to_word(intent.gas_limit));
     buf.extend_from_slice(&u128_to_word(intent.max_fee_per_gas));
+    buf.extend_from_slice(&u128_to_word(intent.max_priority_fee_per_gas));
     buf.extend_from_slice(&intent.required_claim); // bytes32 is already 32 bytes
     keccak256(&buf)
 }
