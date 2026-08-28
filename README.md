@@ -283,3 +283,16 @@ HuntKey is built on three convictions:
 <p align="center">
   <sub>MIT License</sub>
 </p>
+
+---
+
+## Support
+
+HuntKey is maintained as independent open-source work. If it is useful to you or
+your team, sponsorship helps fund maintenance, tests, documentation and releases.
+
+<p align="center">
+  <a href="https://github.com/sponsors/abdulwahed-sweden?metadata_source=huntkey&metadata_campaign=readme">
+    <img src="https://img.shields.io/badge/Sponsor_continued_development-%E2%9D%A4-db61a2?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor continued development">
+  </a>
+</p>
